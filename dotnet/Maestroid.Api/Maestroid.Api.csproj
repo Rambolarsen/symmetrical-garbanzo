@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>maestroid-api</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.AI" Version="10.4.1" />
+    <PackageReference Include="Microsoft.Extensions.ServiceDiscovery" Version="10.4.0" />
+    <PackageReference Include="Microsoft.SemanticKernel" Version="1.74.0" />
+    <PackageReference Include="Anthropic.SDK" Version="5.10.0" />
+    <PackageReference Include="OpenAI" Version="2.9.1" />
+    <PackageReference Include="OllamaSharp" Version="5.4.25" />
+    <PackageReference Include="Microsoft.SemanticKernel.Connectors.Google" Version="1.74.0-alpha" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0-preview.1.25120.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Maestroid.Core\Maestroid.Core.csproj" />
+  </ItemGroup>
+
+</Project>

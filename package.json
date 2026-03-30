@@ -1,0 +1,33 @@
+{
+  "name": "maestroid",
+  "version": "0.1.0",
+  "description": "Transparency-first, human-in-the-loop AI agent orchestration platform",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "server": "node dist/server.js",
+    "server:dev": "tsc --watch & sleep 3 && node --watch dist/server.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.64",
+    "@ai-sdk/google": "^3.0.53",
+    "@ai-sdk/openai": "^3.0.48",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.86",
+    "@godaddy/terminus": "^4.12.1",
+    "ai": "^6.0.141",
+    "express": "^5.2.1",
+    "ollama-ai-provider-v2": "^3.5.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "typescript": "^6.0.2"
+  }
+}

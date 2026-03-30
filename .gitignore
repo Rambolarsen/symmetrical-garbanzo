@@ -1,0 +1,35 @@
+# macOS
+.DS_Store
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Node.js
+node_modules/
+web/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build output
+dist/
+web/dist/
+coverage/
+
+# .NET
+bin/
+obj/
+TestResults/
+
+# IDE and editor settings
+.vs/
+.idea/
+.vscode/
+
+# Local tooling state
+.playwright/
+.claude/
+.mcp.json
