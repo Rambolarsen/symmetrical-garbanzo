@@ -12,6 +12,12 @@ export interface LLMAgentOptions {
   model?: ModelRef;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tools?: ToolDefinition<any, any>[];
+  /**
+   * Pre-built AI SDK tools (e.g. from an MCP client like Serena).
+   * Merged with any `tools` entries. Works with all providers.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  mcpTools?: Record<string, any>;
   maxSteps?: number;
   /** Stream output chunks in real time instead of waiting for full response */
   stream?: boolean;
@@ -33,11 +39,11 @@ export async function runLLMAgent(
   task: string,
   options: LLMAgentOptions
 ): Promise<AgentResult> {
-  const { role, model = MODELS.balanced, tools: toolDefs = [], maxSteps = 10, stream = false, onChunk } = options;
+  const { role, model = MODELS.balanced, tools: toolDefs = [], mcpTools, maxSteps = 10, stream = false, onChunk } = options;
 
   // Build tool set — each entry must use `tool()` helper with inputSchema
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const aiTools = toolDefs.length > 0
+  const convertedTools = toolDefs.length > 0
     ? Object.fromEntries(
         toolDefs.map((t) => [
           t.name,
@@ -51,6 +57,13 @@ export async function runLLMAgent(
         ])
       )
     : undefined;
+
+  // Merge ToolDefinition tools with any pre-built MCP tools (e.g. from Serena)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const aiTools: Record<string, any> | undefined =
+    convertedTools || mcpTools
+      ? { ...convertedTools, ...mcpTools }
+      : undefined;
 
   const start = Date.now();
   const resolvedModel = resolveModel(model);
