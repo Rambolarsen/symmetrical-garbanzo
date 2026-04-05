@@ -3,11 +3,13 @@ import { experimental_createMCPClient } from "ai";
 // ---------------------------------------------------------------------------
 // Serena MCP — semantic code search for any agent/provider
 // ---------------------------------------------------------------------------
-// Serena is an MCP server that understands your codebase at the symbol level.
-// It exposes tools for finding symbols, references, and related code — far
-// more accurate than text search. Because it runs as a plain MCP stdio server
-// the tools it returns are standard Vercel AI SDK CoreTools, so they work
-// with ANY provider (Anthropic, OpenAI, Google, Ollama).
+// Serena is a Python-based MCP server that understands your codebase at the
+// symbol level. It exposes tools for finding symbols, references, and related
+// code — far more accurate than text search. Because it runs as a plain MCP
+// stdio server the tools it returns are standard Vercel AI SDK CoreTools, so
+// they work with ANY provider (Anthropic, OpenAI, Google, Ollama).
+//
+// Requires: uv (https://docs.astral.sh/uv/) — `uvx` must be on PATH.
 //
 // Usage:
 //   const serena = await createSerenaClient("/path/to/project");
@@ -40,11 +42,20 @@ export interface SerenaClient {
  * @param projectPath - Absolute path to the project root Serena should index.
  */
 export async function createSerenaClient(projectPath: string): Promise<SerenaClient> {
+  // Serena is a Python package launched via `uvx` (uv's tool runner).
+  // Entrypoint: `serena start-mcp-server`
+  // Project flag: `--project <path>` (NOT --project-path)
+  // Docs: https://oraios.github.io/serena/02-usage/030_clients.html
   const client = await experimental_createMCPClient({
     transport: {
       type: "stdio",
-      command: "npx",
-      args: ["-y", "@oraios/serena", "--project-path", projectPath],
+      command: "uvx",
+      args: [
+        "-p", "3.13",
+        "--from", "git+https://github.com/oraios/serena",
+        "serena", "start-mcp-server",
+        "--project", projectPath,
+      ],
     },
   });
 
