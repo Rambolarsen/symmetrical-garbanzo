@@ -54,6 +54,7 @@ export async function createSerenaClient(projectPath: string): Promise<SerenaCli
         "-p", "3.13",
         "--from", "git+https://github.com/oraios/serena",
         "serena", "start-mcp-server",
+        "--context", "ide",   // full semantic toolset — not claude-code (which strips tools duplicated by Claude Code builtins)
         "--project", projectPath,
       ],
     },
