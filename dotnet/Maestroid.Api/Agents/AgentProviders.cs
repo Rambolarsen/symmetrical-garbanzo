@@ -2,7 +2,6 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Configuration;
 using Microsoft.SemanticKernel;
-using System.Net.Sockets;
 using Anthropic.SDK;
 using OllamaSharp;
 
@@ -71,13 +70,13 @@ public static class AgentProviderExtensions
         }
 
         // ------------------------------------------------------------------
-        // Ollama (local) — OllamaSharp directly implements IChatClient
+        // Ollama (local) — OllamaSharp directly implements IChatClient.
+        // Registered unconditionally: OllamaApiClient is a lazy HTTP wrapper
+        // that only connects on first request, so startup reachability gating
+        // is unnecessary. This allows Ollama to be started after app boot.
         // ------------------------------------------------------------------
-        if (IsOllamaReachable(ollamaUri))
-        {
-            services.AddKeyedSingleton<IChatClient>(Models.Local,
-                new OllamaApiClient(ollamaUri, Models.Local));
-        }
+        services.AddKeyedSingleton<IChatClient>(Models.Local,
+            new OllamaApiClient(ollamaUri, Models.Local));
 
         // ------------------------------------------------------------------
         // Stable aliases: "fast" and "balanced"
@@ -152,28 +151,6 @@ public static class AgentProviderExtensions
     public static IChatClient? ResolveBalanced(IServiceProvider services) =>
         ResolveFirst(services, Models.Balanced, Models.OpenAiBalanced, Models.Local);
 
-    private static bool IsOllamaReachable(Uri ollamaUri)
-    {
-        if (!string.Equals(ollamaUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(ollamaUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
-            return false;
-
-        var host = ollamaUri.Host;
-        var port = ollamaUri.IsDefaultPort
-            ? (string.Equals(ollamaUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ? 443 : 80)
-            : ollamaUri.Port;
-
-        try
-        {
-            using var client = new TcpClient();
-            var connectTask = client.ConnectAsync(host, port);
-            return connectTask.Wait(TimeSpan.FromMilliseconds(250)) && client.Connected;
-        }
-        catch
-        {
-            return false;
-        }
-    }
 }
 
 /// <summary>

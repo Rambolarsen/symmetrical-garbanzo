@@ -1,6 +1,7 @@
 import { generateText, streamText, tool, stepCountIs } from "ai";
 import type { ToolDefinition, AgentRole, ModelRef } from "../types/index.js";
 import { resolveModel, MODELS } from "./providers/index.js";
+import { withSerenaTools } from "../tools/serena.js";
 import { runClaudeCodeAgent, type ClaudeCodeAgentOptions } from "./claude-code/agent.js";
 
 // ---------------------------------------------------------------------------
@@ -18,6 +19,14 @@ export interface LLMAgentOptions {
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   mcpTools?: Record<string, any>;
+  /**
+   * Start a Serena MCP server and inject its semantic code tools into this agent.
+   * Adds ~2-5s startup overhead on first run (cached after that).
+   * Skip for fast/cheap agents that don't need codebase search.
+   */
+  useSerena?: boolean;
+  /** Project root for Serena. Defaults to process.cwd(). */
+  projectPath?: string;
   maxSteps?: number;
   /** Stream output chunks in real time instead of waiting for full response */
   stream?: boolean;
@@ -39,7 +48,7 @@ export async function runLLMAgent(
   task: string,
   options: LLMAgentOptions
 ): Promise<AgentResult> {
-  const { role, model = MODELS.balanced, tools: toolDefs = [], mcpTools, maxSteps = 10, stream = false, onChunk } = options;
+  const { role, model = MODELS.balanced, tools: toolDefs = [], mcpTools, useSerena = false, projectPath, maxSteps = 10, stream = false, onChunk } = options;
 
   // Build tool set — each entry must use `tool()` helper with inputSchema
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -58,48 +67,57 @@ export async function runLLMAgent(
       )
     : undefined;
 
-  // Merge ToolDefinition tools with any pre-built MCP tools (e.g. from Serena)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const aiTools: Record<string, any> | undefined =
-    convertedTools || mcpTools
-      ? { ...convertedTools, ...mcpTools }
-      : undefined;
+  async function execute(extraTools?: Record<string, any>): Promise<AgentResult> {
+    // Merge: ToolDefinition tools + caller-supplied MCP tools + any injected tools (e.g. Serena)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const aiTools: Record<string, any> | undefined =
+      convertedTools || mcpTools || extraTools
+        ? { ...convertedTools, ...mcpTools, ...extraTools }
+        : undefined;
 
-  const start = Date.now();
-  const resolvedModel = resolveModel(model);
-  const sharedParams = {
-    model: resolvedModel,
-    system: role.instructions,
-    prompt: task,
-    tools: aiTools,
-    stopWhen: stepCountIs(maxSteps),
-  } as const;
+    const start = Date.now();
+    const resolvedModel = resolveModel(model);
+    const sharedParams = {
+      model: resolvedModel,
+      system: role.instructions,
+      prompt: task,
+      tools: aiTools,
+      stopWhen: stepCountIs(maxSteps),
+    } as const;
 
-  let output = "";
-  let inputTokens = 0;
-  let outputTokens = 0;
+    let output = "";
+    let inputTokens = 0;
+    let outputTokens = 0;
 
-  if (stream && onChunk) {
-    const result = await streamText({ ...sharedParams, onChunk: ({ chunk }) => {
-      if (chunk.type === "text-delta") onChunk(chunk.text);
-    }});
-    output = await result.text;
-    const usage = await result.usage;
-    inputTokens = usage?.inputTokens ?? 0;
-    outputTokens = usage?.outputTokens ?? 0;
-  } else {
-    const result = await generateText(sharedParams);
-    output = result.text;
-    inputTokens = result.usage?.inputTokens ?? 0;
-    outputTokens = result.usage?.outputTokens ?? 0;
+    if (stream && onChunk) {
+      const result = await streamText({ ...sharedParams, onChunk: ({ chunk }) => {
+        if (chunk.type === "text-delta") onChunk(chunk.text);
+      }});
+      output = await result.text;
+      const usage = await result.usage;
+      inputTokens = usage?.inputTokens ?? 0;
+      outputTokens = usage?.outputTokens ?? 0;
+    } else {
+      const result = await generateText(sharedParams);
+      output = result.text;
+      inputTokens = result.usage?.inputTokens ?? 0;
+      outputTokens = result.usage?.outputTokens ?? 0;
+    }
+
+    return {
+      output,
+      cost: estimateCost(model, inputTokens, outputTokens),
+      durationMs: Date.now() - start,
+      kind: "llm",
+    };
   }
 
-  return {
-    output,
-    cost: estimateCost(model, inputTokens, outputTokens),
-    durationMs: Date.now() - start,
-    kind: "llm",
-  };
+  if (useSerena) {
+    return withSerenaTools(projectPath ?? process.cwd(), (serenaTools) => execute(serenaTools));
+  }
+
+  return execute();
 }
 
 /**

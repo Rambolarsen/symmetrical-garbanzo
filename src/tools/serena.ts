@@ -1,4 +1,5 @@
-import { experimental_createMCPClient } from "ai";
+import { experimental_createMCPClient } from "@ai-sdk/mcp";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 // ---------------------------------------------------------------------------
 // Serena MCP — semantic code search for any agent/provider
@@ -46,19 +47,18 @@ export async function createSerenaClient(projectPath: string): Promise<SerenaCli
   // Entrypoint: `serena start-mcp-server`
   // Project flag: `--project <path>` (NOT --project-path)
   // Docs: https://oraios.github.io/serena/02-usage/030_clients.html
-  const client = await experimental_createMCPClient({
-    transport: {
-      type: "stdio",
-      command: "uvx",
-      args: [
-        "-p", "3.13",
-        "--from", "git+https://github.com/oraios/serena",
-        "serena", "start-mcp-server",
-        "--context", "ide",   // full semantic toolset — not claude-code (which strips tools duplicated by Claude Code builtins)
-        "--project", projectPath,
-      ],
-    },
+  const transport = new StdioClientTransport({
+    command: "uvx",
+    args: [
+      "-p", "3.13",
+      "--from", "git+https://github.com/oraios/serena",
+      "serena", "start-mcp-server",
+      "--context", "ide",   // full semantic toolset — not claude-code (which strips tools duplicated by Claude Code builtins)
+      "--project", projectPath,
+    ],
   });
+
+  const client = await experimental_createMCPClient({ transport });
 
   const tools = await client.tools();
 

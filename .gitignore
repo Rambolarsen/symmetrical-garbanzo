@@ -33,3 +33,4 @@ TestResults/
 .playwright/
 .claude/
 .mcp.json
+.debug/

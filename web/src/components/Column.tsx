@@ -8,12 +8,34 @@ interface Props {
   accent: string
   headerBg: string
   tasks: Task[]
+  allTasks?: Task[]  // full task list for computing sub-task counts
   onCardClick?: (task: Task) => void
   onEditTask?: (task: Task) => void
+  onPrePlanAll?: (children: Task[]) => void
+  onCancelTask?: (task: Task) => void
+  onViewSpec?: (task: Task) => void
 }
 
-export function Column({ id, label, accent, headerBg, tasks, onCardClick, onEditTask }: Props) {
+export function Column({ id, label, accent, headerBg, tasks, allTasks = [], onCardClick, onEditTask, onPrePlanAll, onCancelTask, onViewSpec }: Props) {
   const { setNodeRef, isOver } = useDroppable({ id })
+
+  // Group children under their parent when both are in this column
+  const columnTaskIds = new Set(tasks.map(t => t.id))
+
+  const childIdsInColumn = new Set(
+    tasks.filter(t => t.parentId && columnTaskIds.has(t.parentId)).map(t => t.id)
+  )
+
+  const topLevel = tasks.filter(t => !childIdsInColumn.has(t.id))
+
+  const childrenByParent = new Map<string, Task[]>()
+  tasks.forEach(t => {
+    if (t.parentId && columnTaskIds.has(t.parentId)) {
+      const list = childrenByParent.get(t.parentId) ?? []
+      list.push(t)
+      childrenByParent.set(t.parentId, list)
+    }
+  })
 
   return (
     <div
@@ -33,17 +55,42 @@ export function Column({ id, label, accent, headerBg, tasks, onCardClick, onEdit
       </div>
 
       {/* Cards */}
-      <div
-        className="flex flex-col gap-2 p-2 flex-1 min-h-[120px]"
-      >
-        {tasks.map(task => (
-          <TaskCard
-            key={task.id}
-            task={task}
-            onClick={onCardClick ? () => onCardClick(task) : undefined}
-            onEdit={onEditTask ? () => onEditTask(task) : undefined}
-          />
-        ))}
+      <div className="flex flex-col gap-2 p-2 flex-1 min-h-[120px]">
+        {topLevel.map(task => {
+          const children = childrenByParent.get(task.id) ?? []
+          return (
+            <div key={task.id}>
+              <TaskCard
+                task={task}
+                subTaskCount={allTasks.filter(t => t.parentId === task.id).length}
+                onClick={onCardClick ? () => onCardClick(task) : undefined}
+                onEdit={onEditTask ? () => onEditTask(task) : undefined}
+                onCancel={onCancelTask && task.loading ? () => onCancelTask(task) : undefined}
+                onViewSpec={onViewSpec ? () => onViewSpec(task) : undefined}
+                onPrePlanAll={(() => {
+                  if (!onPrePlanAll || children.length === 0) return undefined
+                  const eligible = children.filter(c => c.column === 'backlog' && !c.prePlanningResult && !c.loading)
+                  return eligible.length > 0 ? () => onPrePlanAll(eligible) : undefined
+                })()}
+              />
+              {children.length > 0 && (
+                <div className="ml-3 mt-1 space-y-1 border-l-2 border-slate-600 pl-2">
+                  {children.map(child => (
+                    <TaskCard
+                      key={child.id}
+                      task={child}
+                      subTaskCount={0}
+                      onClick={onCardClick ? () => onCardClick(child) : undefined}
+                      onEdit={onEditTask ? () => onEditTask(child) : undefined}
+                      onCancel={onCancelTask && child.loading ? () => onCancelTask(child) : undefined}
+                      onViewSpec={onViewSpec ? () => onViewSpec(child) : undefined}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })}
       </div>
     </div>
   )

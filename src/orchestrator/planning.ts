@@ -53,6 +53,20 @@ Rules:
 - Group work packages into sequential execution phases respecting dependencies
 - Parallel tasks within a phase are fine (canParallelize: true)
 
+Work package quality bar:
+- description must explain the exact file/class/function being changed and why
+- assignedAgent.instructions must be step-by-step actions an agent can execute directly
+- deliverable must name the exact file(s) changed or created
+- successCriteria must be concrete and observable
+
+Specification quality bar:
+- the specification field is an implementation brief for the coding agent, not a stakeholder summary
+- name exact files, classes, functions, endpoints, schemas, and tests to change or create
+- describe the implementation sequence concretely: what to edit first, what logic to add, and how the pieces fit together
+- call out dependency order and any prerequisite work
+- include validation guidance: what to test, run, or manually verify afterward
+- avoid vague phrases like "update the relevant component" or "make necessary changes"
+
 Use the pre-planning context (risks, constraints, recommendedAgents) to inform agent assignments.`;
 
 // ---------------------------------------------------------------------------

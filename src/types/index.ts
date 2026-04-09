@@ -135,3 +135,45 @@ export interface Checkpoint {
   totalCostActual: number;
   totalCostEstimated: number;
 }
+
+// ---------------------------------------------------------------------------
+// SSE execution streaming
+// ---------------------------------------------------------------------------
+
+export type ExecutionStreamEvent =
+  | { type: "progress"; message: string; timestamp: string }
+  | { type: "tool_call"; toolName: string; inputPreview: string; timestamp: string }
+  | { type: "clarification_needed"; requestId: string; question: string; context: string; options?: string[] }
+  | { type: "complete"; output: string; cost: number; durationMs: number }
+  | { type: "error"; message: string };
+
+export interface ClarificationRequest {
+  requestId: string;
+  question: string;
+  context: string;
+  options?: string[];
+}
+
+export interface ExecutionResult {
+  output: string;
+  cost: number;
+  durationMs: number;
+}
+
+// ---------------------------------------------------------------------------
+// Verification
+// ---------------------------------------------------------------------------
+
+export interface CriterionCheck {
+  criterion: string;
+  passed: boolean;
+  evidence: string;     // what the agent found (or didn't)
+  confidence: number;   // 0–1
+}
+
+export interface VerificationResult {
+  overallPassed: boolean;
+  criteriaChecks: CriterionCheck[];
+  summary: string;
+  recommendations?: string[];
+}
