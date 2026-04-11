@@ -1,0 +1,5 @@
+{
+  "appHost": {
+    "path": "dotnet/Maestroid.AppHost/Maestroid.AppHost.csproj"
+  }
+}

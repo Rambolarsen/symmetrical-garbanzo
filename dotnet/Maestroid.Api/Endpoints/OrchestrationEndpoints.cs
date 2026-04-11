@@ -1,10 +1,18 @@
 using Maestroid.Api.Agents;
 using Maestroid.Core.Orchestrator;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Maestroid.Api.Endpoints;
 
 public static class OrchestrationEndpoints
 {
+    private static readonly JsonSerializerOptions SseJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
+
     public static IEndpointRouteBuilder MapOrchestrationEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/orchestration").WithOpenApi();
@@ -17,7 +25,7 @@ public static class OrchestrationEndpoints
         {
             try
             {
-                var result = await prePlanning.RunAsync(req.Task, req.Context, ct);
+                var result = await prePlanning.RunAsync(req.Task, req.Context, ct: ct);
                 return Results.Ok(result);
             }
             catch (TimeoutException tex)
@@ -57,7 +65,7 @@ public static class OrchestrationEndpoints
 
             try
             {
-                var result = await planning.RunAsync(req.Task, req.PrePlanning, context, ct);
+                var result = await planning.RunAsync(req.Task, req.PrePlanning, context, ct: ct);
                 return Results.Ok(result);
             }
             catch (TimeoutException tex)
@@ -208,6 +216,143 @@ public static class OrchestrationEndpoints
         .WithName("Clarify")
         .WithSummary("Send a human clarification answer to resume a paused agent");
 
+        // POST /orchestration/task-chat-stream — SSE-streaming task-aware spec discussion
+        group.MapPost("/task-chat-stream", async (
+            TaskChatStreamRequest req,
+            TaskChatService taskChat,
+            ModelSelectionService models,
+            HttpContext http,
+            CancellationToken ct) =>
+        {
+            var startedAt = DateTimeOffset.UtcNow;
+
+            http.Response.ContentType = "text/event-stream";
+            http.Response.Headers.CacheControl = "no-cache";
+            http.Response.Headers.Connection = "keep-alive";
+            http.Response.Headers["X-Accel-Buffering"] = "no";
+
+            async Task Emit(object payload)
+            {
+                await http.Response.WriteAsync($"data: {JsonSerializer.Serialize(payload, SseJsonOptions)}\n\n", ct);
+                await http.Response.Body.FlushAsync(ct);
+            }
+
+            try
+            {
+                var result = await taskChat.RunAsync(
+                    new TaskChatRequest(
+                        req.TaskTitle,
+                        req.Spec,
+                        req.Phase,
+                        req.Messages.Select(m => new TaskChatMessage(m.Role, m.Content)).ToList(),
+                        req.PrePlanning,
+                        req.Planning,
+                        req.Transcript),
+                    onProgress: (e, token) => Emit(WithModelInfo(
+                        e,
+                        models,
+                        req.Phase,
+                        string.Equals(req.Phase, "pre-planning", StringComparison.OrdinalIgnoreCase) ? "fast" : "balanced",
+                        startedAt)),
+                    ct: ct);
+
+                await Emit(new { type = "complete", output = result.Output });
+            }
+            catch (OperationCanceledException) { /* client disconnected */ }
+            catch (Exception ex)
+            {
+                try { await Emit(new { type = "error", message = ex.Message }); } catch { /* response gone */ }
+            }
+        })
+        .WithName("TaskChatStream")
+        .WithSummary("Discuss and refine a task spec with the underlying model");
+
+        // POST /orchestration/pre-plan-stream — SSE-streaming pre-planning
+        group.MapPost("/pre-plan-stream", async (
+            PrePlanRequest req,
+            PrePlanningService prePlanning,
+            ModelSelectionService models,
+            HttpContext http,
+            CancellationToken ct) =>
+        {
+            var startedAt = DateTimeOffset.UtcNow;
+
+            http.Response.ContentType = "text/event-stream";
+            http.Response.Headers.CacheControl = "no-cache";
+            http.Response.Headers.Connection = "keep-alive";
+            http.Response.Headers["X-Accel-Buffering"] = "no";
+
+            async Task Emit(object payload)
+            {
+                await http.Response.WriteAsync($"data: {JsonSerializer.Serialize(payload, SseJsonOptions)}\n\n", ct);
+                await http.Response.Body.FlushAsync(ct);
+            }
+
+            try
+            {
+                var result = await prePlanning.RunAsync(
+                    req.Task, req.Context,
+                    onProgress: (e, token) => Emit(WithModelInfo(e, models, "pre-planning", "fast", startedAt)),
+                    ct: ct);
+                await Emit(new { type = "complete", result });
+            }
+            catch (OperationCanceledException) { /* client disconnected */ }
+            catch (Exception ex)
+            {
+                try { await Emit(new { type = "error", message = ex.Message }); } catch { /* response gone */ }
+            }
+        })
+        .WithName("PrePlanStream")
+        .WithSummary("Phase 0: pre-planning with SSE progress events");
+
+        // POST /orchestration/plan-stream — SSE-streaming planning
+        group.MapPost("/plan-stream", async (
+            PlanRequest req,
+            PlanningService planning,
+            ClaudeCodeSidecarClient sidecar,
+            ModelSelectionService models,
+            HttpContext http,
+            CancellationToken ct) =>
+        {
+            var startedAt = DateTimeOffset.UtcNow;
+
+            http.Response.ContentType = "text/event-stream";
+            http.Response.Headers.CacheControl = "no-cache";
+            http.Response.Headers.Connection = "keep-alive";
+            http.Response.Headers["X-Accel-Buffering"] = "no";
+
+            async Task Emit(object payload)
+            {
+                await http.Response.WriteAsync($"data: {JsonSerializer.Serialize(payload, SseJsonOptions)}\n\n", ct);
+                await http.Response.Body.FlushAsync(ct);
+            }
+
+            // Enrich context with Serena (best-effort)
+            var context = req.Context;
+            if (!string.IsNullOrWhiteSpace(req.ProjectPath))
+            {
+                var serenaContext = await sidecar.GetSerenaContextAsync(req.ProjectPath, req.Task, ct);
+                if (!string.IsNullOrWhiteSpace(serenaContext))
+                    context = $"{context}\n\n---\nTask-relevant code (from Serena):\n{serenaContext}";
+            }
+
+            try
+            {
+                var result = await planning.RunAsync(
+                    req.Task, req.PrePlanning, context,
+                    onProgress: (e, token) => Emit(WithModelInfo(e, models, "planning", "balanced", startedAt)),
+                    ct: ct);
+                await Emit(new { type = "complete", result });
+            }
+            catch (OperationCanceledException) { /* client disconnected */ }
+            catch (Exception ex)
+            {
+                try { await Emit(new { type = "error", message = ex.Message }); } catch { /* response gone */ }
+            }
+        })
+        .WithName("PlanStream")
+        .WithSummary("Phase 1: planning with SSE progress events");
+
         // POST /orchestration/verify — run LLM verification against success criteria
         group.MapPost("/verify", async (
             VerifyRequest req,
@@ -226,6 +371,31 @@ public static class OrchestrationEndpoints
 
         return app;
     }
+
+    private static PlanProgressEvent WithModelInfo(
+        PlanProgressEvent progress,
+        ModelSelectionService models,
+        string defaultPhase,
+        string defaultTier,
+        DateTimeOffset startedAt)
+    {
+        var tier = string.IsNullOrWhiteSpace(progress.Tier) ? defaultTier : progress.Tier;
+        var model = progress.Model ?? tier switch
+        {
+            "fast" => models.Fast,
+            "balanced" => models.Balanced,
+            _ => null,
+        };
+        var elapsedMs = progress.ElapsedMs ?? (int)Math.Max(0, (DateTimeOffset.UtcNow - startedAt).TotalMilliseconds);
+
+        return progress with
+        {
+            Phase = progress.Phase ?? defaultPhase,
+            Tier = tier,
+            Model = model,
+            ElapsedMs = elapsedMs,
+        };
+    }
 }
 
 public record PrePlanRequest(string Task, string? Context = null);
@@ -233,6 +403,16 @@ public record PlanRequest(string Task, PrePlanningResult? PrePlanning = null, st
 
 public record RepoContextRequest(string Source, string? GithubToken = null);
 public record SerenaContextRequest(string ProjectPath, string Task);
+public record TaskChatMessageRequest(string Role, string Content);
+public record TaskChatStreamRequest(
+    string TaskTitle,
+    string Spec,
+    string Phase,
+    IReadOnlyList<TaskChatMessageRequest> Messages,
+    PrePlanningResult? PrePlanning = null,
+    PlanningResult? Planning = null,
+    string? Transcript = null
+);
 
 public record CodeAgentRequest(
     string Task,

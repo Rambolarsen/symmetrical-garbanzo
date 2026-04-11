@@ -3,6 +3,13 @@ export interface SpecSection {
   content: string  // trimmed body text
 }
 
+export function sanitizeSectionContent(content: string): string {
+  return content
+    .replace(/\r\n/g, '\n')
+    .replace(/^#\s+/gm, '### ')
+    .replace(/^##\s+/gm, '### ')
+}
+
 export function parseSpec(spec: string): SpecSection[] {
   if (!spec.trim()) return []
   const normalized = spec.replace(/\r\n/g, '\n')
@@ -52,6 +59,42 @@ export function upsertSpecSection(spec: string, sectionBlock: string): string {
   }
 
   return reconstructSpec(sections)
+}
+
+export function upsertClarificationsSection(spec: string, clarification: string): string {
+  const trimmed = sanitizeSectionContent(clarification).trim()
+  if (!trimmed) return spec.trim()
+
+  const sections = parseSpec(spec)
+  const normalized = trimmed.replace(/\r\n/g, '\n')
+  const existing = sections.find(section => section.heading === 'Clarifications')
+
+  if (!existing) {
+    return reconstructSpec([
+      ...sections,
+      { heading: 'Clarifications', content: normalized },
+    ])
+  }
+
+  if (existing.content.includes(normalized)) {
+    return reconstructSpec(sections)
+  }
+
+  const updated = sections.map(section =>
+    section.heading === 'Clarifications'
+      ? { ...section, content: `${section.content.trim()}\n\n${normalized}`.trim() }
+      : section
+  )
+
+  return reconstructSpec(updated)
+}
+
+export function extractClarificationDraft(content: string): string | null {
+  const match = content.match(/Clarification Draft:\s*([\s\S]*)$/i)
+  if (!match) return null
+
+  const draft = match[1].trim()
+  return draft.length > 0 ? draft : null
 }
 
 export function extractUserPrompt(spec: string): string {

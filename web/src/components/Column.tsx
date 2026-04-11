@@ -11,12 +11,16 @@ interface Props {
   allTasks?: Task[]  // full task list for computing sub-task counts
   onCardClick?: (task: Task) => void
   onEditTask?: (task: Task) => void
+  onChatTask?: (task: Task) => void
+  canChatTask?: (task: Task) => boolean
+  onDebugTask?: (task: Task) => void
+  canDebugTask?: (task: Task) => boolean
   onPrePlanAll?: (children: Task[]) => void
   onCancelTask?: (task: Task) => void
   onViewSpec?: (task: Task) => void
 }
 
-export function Column({ id, label, accent, headerBg, tasks, allTasks = [], onCardClick, onEditTask, onPrePlanAll, onCancelTask, onViewSpec }: Props) {
+export function Column({ id, label, accent, headerBg, tasks, allTasks = [], onCardClick, onEditTask, onChatTask, canChatTask, onDebugTask, canDebugTask, onPrePlanAll, onCancelTask, onViewSpec }: Props) {
   const { setNodeRef, isOver } = useDroppable({ id })
 
   // Group children under their parent when both are in this column
@@ -65,6 +69,8 @@ export function Column({ id, label, accent, headerBg, tasks, allTasks = [], onCa
                 subTaskCount={allTasks.filter(t => t.parentId === task.id).length}
                 onClick={onCardClick ? () => onCardClick(task) : undefined}
                 onEdit={onEditTask ? () => onEditTask(task) : undefined}
+                onChat={onChatTask && (canChatTask?.(task) ?? true) ? () => onChatTask(task) : undefined}
+                onDebug={onDebugTask && (canDebugTask?.(task) ?? true) ? () => onDebugTask(task) : undefined}
                 onCancel={onCancelTask && task.loading ? () => onCancelTask(task) : undefined}
                 onViewSpec={onViewSpec ? () => onViewSpec(task) : undefined}
                 onPrePlanAll={(() => {
@@ -82,6 +88,8 @@ export function Column({ id, label, accent, headerBg, tasks, allTasks = [], onCa
                       subTaskCount={0}
                       onClick={onCardClick ? () => onCardClick(child) : undefined}
                       onEdit={onEditTask ? () => onEditTask(child) : undefined}
+                      onChat={onChatTask && (canChatTask?.(child) ?? true) ? () => onChatTask(child) : undefined}
+                      onDebug={onDebugTask && (canDebugTask?.(child) ?? true) ? () => onDebugTask(child) : undefined}
                       onCancel={onCancelTask && child.loading ? () => onCancelTask(child) : undefined}
                       onViewSpec={onViewSpec ? () => onViewSpec(child) : undefined}
                     />

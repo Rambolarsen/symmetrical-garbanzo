@@ -1,6 +1,9 @@
 import type {
   PrePlanningResult,
   PlanningResult,
+  PlanningProgress,
+  ModelOutputDelta,
+  TaskChatMessage,
   VerificationResult,
   ClarificationRequest,
   ExecutionStreamEvent,
@@ -42,6 +45,27 @@ function normalizePrePlanningResult(raw: any): PrePlanningResult {
     successCriteria: raw.successCriteria ?? [],
     recommendedAgents: raw.recommendedAgents ?? [],
   }
+}
+
+export interface ModelConfig {
+  fast: string
+  balanced: string
+  available: string[]
+}
+
+export async function getModels(): Promise<ModelConfig> {
+  const res = await fetch(`${BASE}/models`)
+  return res.json()
+}
+
+export async function updateModels(update: { fast?: string; balanced?: string }): Promise<ModelConfig> {
+  const res = await fetch(`${BASE}/models`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(update),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
 }
 
 export interface OllamaStartResult {
@@ -99,6 +123,290 @@ export function prePlan(spec: string, context: string, signal?: AbortSignal): Pr
 
 export function plan(spec: string, prePlanning: PrePlanningResult, context: string, projectPath?: string, signal?: AbortSignal): Promise<PlanningResult> {
   return post('/orchestration/plan', { task: spec, prePlanning, context, projectPath }, signal)
+}
+
+// ---------------------------------------------------------------------------
+// Pre-plan / plan streaming
+// ---------------------------------------------------------------------------
+
+async function readPlanStream<T>(
+  url: string,
+  body: unknown,
+  signal: AbortSignal | undefined,
+  onProgress: (progress: PlanningProgress) => void,
+  onModelDelta?: (delta: ModelOutputDelta) => void
+): Promise<T> {
+  const response = await fetch(`${BASE}${url}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+
+  if (!response.ok) {
+    throw new Error(await response.text() || `HTTP ${response.status}`)
+  }
+
+  const reader = response.body?.getReader()
+  if (!reader) throw new Error('No response body')
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith('data:')) continue
+        const jsonStr = trimmed.slice('data:'.length).trim()
+        if (!jsonStr) continue
+
+        let event: {
+          type: string
+          message?: string
+          phase?: string
+          tier?: string
+          model?: string
+          elapsedMs?: number
+          text?: string
+          attempt?: number
+          maxAttempts?: number
+          issues?: string[]
+          result?: T
+        }
+        try { event = JSON.parse(jsonStr) } catch { continue }
+
+        if (event.type === 'model_delta') {
+          if (event.text) {
+            onModelDelta?.({
+              text: event.text,
+              phase: event.phase,
+              tier: event.tier,
+              model: event.model,
+              elapsedMs: event.elapsedMs,
+            })
+          }
+        } else if (event.type === 'progress' && event.message) {
+          onProgress({
+            type: 'progress',
+            message: event.message,
+            phase: event.phase,
+            tier: event.tier,
+            model: event.model,
+            elapsedMs: event.elapsedMs,
+            attempt: event.attempt,
+            maxAttempts: event.maxAttempts,
+            issues: event.issues,
+          })
+        } else if (event.type === 'retry') {
+          const n = (event.attempt ?? 0) + 1
+          const max = event.maxAttempts ?? 2
+          const count = event.issues?.length ?? 0
+          onProgress({
+            type: 'retry',
+            message: `Attempt ${n}/${max}: refining with ${count} issue${count !== 1 ? 's' : ''}…`,
+            phase: event.phase,
+            tier: event.tier,
+            model: event.model,
+            elapsedMs: event.elapsedMs,
+            attempt: event.attempt,
+            maxAttempts: event.maxAttempts,
+            issues: event.issues,
+          })
+        } else if (event.type === 'complete') {
+          return event.result as T
+        } else if (event.type === 'error') {
+          throw new Error(event.message ?? 'Planning error')
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  throw new Error('Stream ended without a result')
+}
+
+export function streamPrePlan(
+  spec: string,
+  context: string,
+  signal: AbortSignal | undefined,
+  onProgress: (progress: PlanningProgress) => void,
+  onModelDelta?: (delta: ModelOutputDelta) => void
+): Promise<PrePlanningResult> {
+  return readPlanStream<any>(
+    '/orchestration/pre-plan-stream',
+    { task: spec, context },
+    signal,
+    onProgress,
+    onModelDelta
+  ).then(normalizePrePlanningResult)
+}
+
+export function streamPlan(
+  spec: string,
+  prePlanning: PrePlanningResult,
+  context: string,
+  projectPath: string | undefined,
+  signal: AbortSignal | undefined,
+  onProgress: (progress: PlanningProgress) => void,
+  onModelDelta?: (delta: ModelOutputDelta) => void
+): Promise<PlanningResult> {
+  return readPlanStream<PlanningResult>(
+    '/orchestration/plan-stream',
+    { task: spec, prePlanning, context, projectPath },
+    signal,
+    onProgress,
+    onModelDelta
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Task-aware chat streaming
+// ---------------------------------------------------------------------------
+
+export interface StreamTaskChatOptions {
+  taskTitle: string
+  spec: string
+  phase: string
+  messages: TaskChatMessage[]
+  prePlanning?: PrePlanningResult
+  planning?: PlanningResult
+  transcript?: string
+}
+
+export interface StreamTaskChatHandlers {
+  onProgress?: (progress: PlanningProgress) => void
+  onModelDelta: (delta: ModelOutputDelta) => void
+  onComplete: (output: string) => void
+  onError: (message: string) => void
+}
+
+export function streamTaskChat(
+  options: StreamTaskChatOptions,
+  handlers: StreamTaskChatHandlers
+): () => void {
+  const controller = new AbortController()
+
+  ;(async () => {
+    let response: Response
+
+    try {
+      response = await fetch(`${BASE}/orchestration/task-chat-stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          taskTitle: options.taskTitle,
+          spec: options.spec,
+          phase: options.phase,
+          messages: options.messages.map(message => ({
+            role: message.role,
+            content: message.content,
+          })),
+          prePlanning: options.prePlanning,
+          planning: options.planning,
+          transcript: options.transcript,
+        }),
+        signal: controller.signal,
+      })
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        handlers.onError((err as Error).message ?? 'Network error')
+      }
+      return
+    }
+
+    if (!response.ok) {
+      const text = await response.text()
+      handlers.onError(text || `HTTP ${response.status}`)
+      return
+    }
+
+    const reader = response.body?.getReader()
+    if (!reader) {
+      handlers.onError('No response body')
+      return
+    }
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed.startsWith('data:')) continue
+          const jsonStr = trimmed.slice('data:'.length).trim()
+          if (!jsonStr) continue
+
+          let event: {
+            type: string
+            message?: string
+            text?: string
+            phase?: string
+            tier?: string
+            model?: string
+            elapsedMs?: number
+            output?: string
+            attempt?: number
+            maxAttempts?: number
+            issues?: string[]
+          }
+          try { event = JSON.parse(jsonStr) } catch { continue }
+
+          if (event.type === 'model_delta' && event.text) {
+            handlers.onModelDelta({
+              text: event.text,
+              phase: event.phase,
+              tier: event.tier,
+              model: event.model,
+              elapsedMs: event.elapsedMs,
+            })
+          } else if ((event.type === 'progress' || event.type === 'retry') && event.message) {
+            handlers.onProgress?.({
+              type: event.type === 'retry' ? 'retry' : 'progress',
+              message: event.message,
+              phase: event.phase,
+              tier: event.tier,
+              model: event.model,
+              elapsedMs: event.elapsedMs,
+              attempt: event.attempt,
+              maxAttempts: event.maxAttempts,
+              issues: event.issues,
+            })
+          } else if (event.type === 'complete') {
+            handlers.onComplete(event.output ?? '')
+            return
+          } else if (event.type === 'error') {
+            handlers.onError(event.message ?? 'Task chat error')
+            return
+          }
+        }
+      }
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        handlers.onError((err as Error).message ?? 'Stream read error')
+      }
+    } finally {
+      reader.releaseLock()
+    }
+  })()
+
+  return () => controller.abort()
 }
 
 // ---------------------------------------------------------------------------

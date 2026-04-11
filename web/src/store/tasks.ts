@@ -1,6 +1,6 @@
 import { useReducer, useCallback } from 'react'
-import type { Task, ColumnId, PrePlanningResult, PlanningResult, ClarificationRequest, VerificationResult } from '../types'
-import { upsertSpecSection } from '../lib/specUtils'
+import type { Task, ColumnId, PrePlanningResult, PlanningResult, ClarificationRequest, VerificationResult, PlanningProgress, TaskChatMessage } from '../types'
+import { upsertClarificationsSection, upsertSpecSection } from '../lib/specUtils'
 
 type Action =
   | { type: 'ADD'; task: Task }
@@ -19,6 +19,15 @@ type Action =
   | { type: 'SET_SPEC'; id: string; spec: string }
   | { type: 'UPSERT_SPEC_SECTION'; id: string; section: string }
   | { type: 'SET_DERIVED_FROM'; id: string; derivedFromId: string }
+  | { type: 'SET_PLANNING_PROGRESS'; id: string; progress: PlanningProgress | undefined }
+  | { type: 'APPEND_PLANNING_TRANSCRIPT'; id: string; text: string }
+  | { type: 'APPEND_CHAT_MESSAGE'; id: string; message: TaskChatMessage }
+  | { type: 'APPEND_CHAT_ASSISTANT_DELTA'; id: string; text: string }
+  | { type: 'SET_CHAT_LOADING'; id: string; loading: boolean }
+  | { type: 'SET_CHAT_ERROR'; id: string; error: string | undefined }
+  | { type: 'SET_CHAT_PROGRESS'; id: string; progress: PlanningProgress | undefined }
+  | { type: 'MARK_SPEC_DIRTY_FROM_CHAT'; id: string; dirty: boolean }
+  | { type: 'APPLY_CHAT_CLARIFICATION'; id: string; clarification: string }
 
 function reducer(tasks: Task[], action: Action): Task[] {
   switch (action.type) {
@@ -43,6 +52,13 @@ function reducer(tasks: Task[], action: Action): Task[] {
           error: undefined,
           prePlanningResult: undefined,
           planningResult: undefined,
+          planningProgress: undefined,
+          planningTranscript: undefined,
+          chatMessages: undefined,
+          chatProgress: undefined,
+          chatLoading: undefined,
+          chatError: undefined,
+          specDirtyFromChat: undefined,
           executionOutput: undefined,
           pendingClarification: undefined,
           verificationResult: undefined,
@@ -62,13 +78,20 @@ function reducer(tasks: Task[], action: Action): Task[] {
           }
         : t)
     case 'SET_LOADING':
-      return tasks.map(t => t.id === action.id ? { ...t, loading: action.loading } : t)
+      return tasks.map(t => t.id === action.id
+        ? {
+            ...t,
+            loading: action.loading,
+            planningProgress: action.loading ? undefined : t.planningProgress,
+            planningTranscript: action.loading && (t.column === 'pre-planning' || t.column === 'planning') ? '' : t.planningTranscript,
+          }
+        : t)
     case 'SET_ERROR':
       return tasks.map(t => t.id === action.id ? { ...t, error: action.error, loading: false } : t)
     case 'SET_PRE_PLANNING':
-      return tasks.map(t => t.id === action.id ? { ...t, prePlanningResult: action.result, loading: false } : t)
+      return tasks.map(t => t.id === action.id ? { ...t, prePlanningResult: action.result, planningProgress: undefined, loading: false, specDirtyFromChat: false } : t)
     case 'SET_PLANNING':
-      return tasks.map(t => t.id === action.id ? { ...t, planningResult: action.result, loading: false } : t)
+      return tasks.map(t => t.id === action.id ? { ...t, planningResult: action.result, planningProgress: undefined, loading: false, specDirtyFromChat: false } : t)
     case 'APPEND_EXECUTION_OUTPUT':
       return tasks.map(t => t.id === action.id
         ? { ...t, executionOutput: (t.executionOutput ?? '') + action.chunk }
@@ -93,6 +116,52 @@ function reducer(tasks: Task[], action: Action): Task[] {
         : t)
     case 'SET_DERIVED_FROM':
       return tasks.map(t => t.id === action.id ? { ...t, derivedFromId: action.derivedFromId } : t)
+    case 'SET_PLANNING_PROGRESS':
+      return tasks.map(t => t.id === action.id ? { ...t, planningProgress: action.progress } : t)
+    case 'APPEND_PLANNING_TRANSCRIPT':
+      return tasks.map(t => t.id === action.id
+        ? { ...t, planningTranscript: (t.planningTranscript ?? '') + action.text }
+        : t)
+    case 'APPEND_CHAT_MESSAGE':
+      return tasks.map(t => t.id === action.id
+        ? { ...t, chatMessages: [...(t.chatMessages ?? []), action.message], chatError: undefined }
+        : t)
+    case 'APPEND_CHAT_ASSISTANT_DELTA':
+      return tasks.map(t => {
+        if (t.id !== action.id) return t
+
+        const messages = [...(t.chatMessages ?? [])]
+        const last = messages.at(-1)
+        if (!last || last.role !== 'assistant') {
+          messages.push({
+            id: `chat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            role: 'assistant',
+            content: action.text,
+            createdAt: new Date().toISOString(),
+          })
+        } else {
+          messages[messages.length - 1] = { ...last, content: last.content + action.text }
+        }
+
+        return { ...t, chatMessages: messages, chatError: undefined }
+      })
+    case 'SET_CHAT_LOADING':
+      return tasks.map(t => t.id === action.id ? { ...t, chatLoading: action.loading, chatProgress: action.loading ? undefined : t.chatProgress } : t)
+    case 'SET_CHAT_ERROR':
+      return tasks.map(t => t.id === action.id ? { ...t, chatError: action.error, chatLoading: false } : t)
+    case 'SET_CHAT_PROGRESS':
+      return tasks.map(t => t.id === action.id ? { ...t, chatProgress: action.progress } : t)
+    case 'MARK_SPEC_DIRTY_FROM_CHAT':
+      return tasks.map(t => t.id === action.id ? { ...t, specDirtyFromChat: action.dirty } : t)
+    case 'APPLY_CHAT_CLARIFICATION':
+      return tasks.map(t => t.id === action.id
+        ? {
+            ...t,
+            spec: upsertClarificationsSection(t.spec ?? '', action.clarification),
+            specDirtyFromChat: true,
+            chatError: undefined,
+          }
+        : t)
   }
 }
 
@@ -158,6 +227,33 @@ export function useTasks() {
   const setDerivedFrom = useCallback((id: string, derivedFromId: string) =>
     dispatch({ type: 'SET_DERIVED_FROM', id, derivedFromId }), [])
 
+  const setPlanningProgress = useCallback((id: string, progress: PlanningProgress | undefined) =>
+    dispatch({ type: 'SET_PLANNING_PROGRESS', id, progress }), [])
+
+  const appendPlanningTranscript = useCallback((id: string, text: string) =>
+    dispatch({ type: 'APPEND_PLANNING_TRANSCRIPT', id, text }), [])
+
+  const appendChatMessage = useCallback((id: string, message: TaskChatMessage) =>
+    dispatch({ type: 'APPEND_CHAT_MESSAGE', id, message }), [])
+
+  const appendChatAssistantDelta = useCallback((id: string, text: string) =>
+    dispatch({ type: 'APPEND_CHAT_ASSISTANT_DELTA', id, text }), [])
+
+  const setChatLoading = useCallback((id: string, loading: boolean) =>
+    dispatch({ type: 'SET_CHAT_LOADING', id, loading }), [])
+
+  const setChatError = useCallback((id: string, error: string | undefined) =>
+    dispatch({ type: 'SET_CHAT_ERROR', id, error }), [])
+
+  const setChatProgress = useCallback((id: string, progress: PlanningProgress | undefined) =>
+    dispatch({ type: 'SET_CHAT_PROGRESS', id, progress }), [])
+
+  const markSpecDirtyFromChat = useCallback((id: string, dirty: boolean) =>
+    dispatch({ type: 'MARK_SPEC_DIRTY_FROM_CHAT', id, dirty }), [])
+
+  const applyChatClarification = useCallback((id: string, clarification: string) =>
+    dispatch({ type: 'APPLY_CHAT_CLARIFICATION', id, clarification }), [])
+
   return {
     tasks,
     addTask, updateTask, moveTask, removeTask,
@@ -168,5 +264,14 @@ export function useTasks() {
     setClarification, clearClarification,
     setVerification,
     setSpec, upsertSpec, setDerivedFrom,
+    setPlanningProgress,
+    appendPlanningTranscript,
+    appendChatMessage,
+    appendChatAssistantDelta,
+    setChatLoading,
+    setChatError,
+    setChatProgress,
+    markSpecDirtyFromChat,
+    applyChatClarification,
   }
 }

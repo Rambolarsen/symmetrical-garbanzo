@@ -4,6 +4,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.SemanticKernel;
 using Anthropic.SDK;
 using OllamaSharp;
+using System.Net.Http.Json;
 
 namespace Maestroid.Api.Agents;
 
@@ -14,7 +15,12 @@ public static class Models
     public const string Powerful       = "claude-opus-4-6";
     public const string OpenAiFast     = "gpt-4o-mini";
     public const string OpenAiBalanced = "gpt-4o";
-    public const string Local          = "llama3.2";
+
+    /// <summary>
+    /// Default local model name. Resolved at startup from config key "Models:Local".
+    /// Defaults to "llama3.2" if not set.
+    /// </summary>
+    public static string Local { get; internal set; } = "llama3.2";
 }
 
 public static class AgentProviderExtensions
@@ -26,6 +32,8 @@ public static class AgentProviderExtensions
         var anthropicKey = config["ANTHROPIC_API_KEY"];
         var openAiKey    = config["OPENAI_API_KEY"];
         var ollamaUri    = new Uri(config["OLLAMA_HOST"] ?? "http://localhost:11434");
+
+        var available = new List<string>();
 
         // ------------------------------------------------------------------
         // Anthropic — MessagesEndpoint implements IChatClient directly.
@@ -44,6 +52,7 @@ public static class AgentProviderExtensions
                         .AsBuilder()
                         .UseFunctionInvocation()
                         .Build());
+                available.Add(m);
             }
         }
 
@@ -67,52 +76,74 @@ public static class AgentProviderExtensions
                     .AsBuilder()
                     .UseFunctionInvocation()
                     .Build());
+
+            available.Add(Models.OpenAiFast);
+            available.Add(Models.OpenAiBalanced);
         }
 
         // ------------------------------------------------------------------
-        // Ollama (local) — OllamaSharp directly implements IChatClient.
-        // Registered unconditionally: OllamaApiClient is a lazy HTTP wrapper
-        // that only connects on first request, so startup reachability gating
-        // is unnecessary. This allows Ollama to be started after app boot.
+        // Ollama (local) — auto-discover models from /api/tags at startup.
+        // Falls back to Models:Local / Models:LocalModels config if Ollama
+        // is offline at boot (models will be registered lazily, connecting
+        // only on first request).
         // ------------------------------------------------------------------
-        services.AddKeyedSingleton<IChatClient>(Models.Local,
-            new OllamaApiClient(ollamaUri, Models.Local));
+        var configuredLocal = config["Models:Local"];
+        if (!string.IsNullOrWhiteSpace(configuredLocal))
+            Models.Local = configuredLocal;
+
+        var localModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var discovered = DiscoverOllamaModels(ollamaUri);
+        foreach (var m in discovered)
+            localModels.Add(m);
+
+        localModels.Add(Models.Local);
+        var extraModels = config["Models:LocalModels"];
+        if (!string.IsNullOrWhiteSpace(extraModels))
+        {
+            foreach (var m in extraModels.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                localModels.Add(m);
+        }
+
+        if (string.IsNullOrWhiteSpace(configuredLocal) && discovered.Count > 0)
+            Models.Local = discovered[0];
+
+        // OllamaApiClient uses a shared HttpClient with a generous timeout.
+        // The default 100s HttpClient timeout causes TaskCanceledException (→ 499)
+        // when local models take longer on large prompts like planning.
+        var ollamaHttp = new HttpClient { BaseAddress = ollamaUri, Timeout = TimeSpan.FromMinutes(10) };
+
+        foreach (var localModel in localModels)
+        {
+            var m = localModel;
+            services.AddKeyedSingleton<IChatClient>(m, new OllamaApiClient(ollamaHttp, m));
+            available.Add(m);
+        }
 
         // ------------------------------------------------------------------
-        // Stable aliases: "fast" and "balanced"
-        // If Models:Fast / Models:Balanced is set in config, that model key is
-        // used directly. Otherwise falls back through the priority chain.
+        // ModelSelectionService — determines initial fast/balanced defaults,
+        // then lets the UI override them at runtime.
         // ------------------------------------------------------------------
         var configuredFast     = config["Models:Fast"];
         var configuredBalanced = config["Models:Balanced"];
 
+        var initialFast     = ResolveInitialKey(configuredFast,     available, [Models.Fast,     Models.OpenAiFast,     Models.Local]);
+        var initialBalanced = ResolveInitialKey(configuredBalanced, available, [Models.Balanced, Models.OpenAiBalanced, Models.Local]);
+
+        services.AddSingleton(new ModelSelectionService(initialFast, initialBalanced, available.AsReadOnly()));
+
+        // ------------------------------------------------------------------
+        // Stable aliases: "fast" and "balanced"
+        // Singleton DynamicTierChatClient delegates to whichever model
+        // ModelSelectionService currently points to — resolved per call,
+        // not per registration. Singleton avoids DI disposing the underlying
+        // provider clients (which are also singletons) at scope end.
+        // ------------------------------------------------------------------
         services.AddKeyedSingleton<IChatClient>("fast", (sp, _) =>
-        {
-            if (!string.IsNullOrWhiteSpace(configuredFast))
-            {
-                var client = (sp as IKeyedServiceProvider)?.GetKeyedService<IChatClient>(configuredFast);
-                if (client is not null) return client;
-                throw new InvalidOperationException(
-                    $"Model '{configuredFast}' is configured as Models:Fast but its provider is not registered. " +
-                    "Check that the corresponding API key is set.");
-            }
-            return ResolveFast(sp) ?? throw new InvalidOperationException(
-                "No fast model available. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or start Ollama.");
-        });
+            new DynamicTierChatClient("fast", sp.GetRequiredService<ModelSelectionService>(), sp));
 
         services.AddKeyedSingleton<IChatClient>("balanced", (sp, _) =>
-        {
-            if (!string.IsNullOrWhiteSpace(configuredBalanced))
-            {
-                var client = (sp as IKeyedServiceProvider)?.GetKeyedService<IChatClient>(configuredBalanced);
-                if (client is not null) return client;
-                throw new InvalidOperationException(
-                    $"Model '{configuredBalanced}' is configured as Models:Balanced but its provider is not registered. " +
-                    "Check that the corresponding API key is set.");
-            }
-            return ResolveBalanced(sp) ?? throw new InvalidOperationException(
-                "No balanced model available. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or start Ollama.");
-        });
+            new DynamicTierChatClient("balanced", sp.GetRequiredService<ModelSelectionService>(), sp));
 
         // ------------------------------------------------------------------
         // Semantic Kernel — only built when at least one key is configured
@@ -129,6 +160,48 @@ public static class AgentProviderExtensions
     }
 
     /// <summary>
+    /// Resolves an initial model key for a tier. Uses the configured value if it's in the available
+    /// list, otherwise walks the candidate priority list.
+    /// </summary>
+    private static string ResolveInitialKey(string? configured, List<string> available, string[] candidates)
+    {
+        if (!string.IsNullOrWhiteSpace(configured) && available.Contains(configured))
+            return configured;
+        return candidates.FirstOrDefault(available.Contains)
+            ?? available.FirstOrDefault()
+            ?? Models.Local;
+    }
+
+    /// <summary>
+    /// Synchronously queries Ollama's /api/tags and returns the list of available model names.
+    /// Returns an empty list if Ollama is unreachable or returns an unexpected response.
+    /// </summary>
+    private static List<string> DiscoverOllamaModels(Uri ollamaUri)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+            var url = $"{ollamaUri.ToString().TrimEnd('/')}/api/tags";
+            var response = http.GetAsync(url).GetAwaiter().GetResult();
+            if (!response.IsSuccessStatusCode) return [];
+
+            var body = response.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>()
+                .GetAwaiter().GetResult();
+
+            if (!body.TryGetProperty("models", out var arr)) return [];
+
+            return [.. arr.EnumerateArray()
+                .Select(m => m.TryGetProperty("name", out var n) ? n.GetString() : null)
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .Select(n => n!)];
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    /// <summary>
     /// Returns the first available IChatClient from an ordered list of model keys.
     /// Falls back through Anthropic → OpenAI → Ollama depending on what keys are configured.
     /// </summary>
@@ -142,14 +215,6 @@ public static class AgentProviderExtensions
         }
         return null;
     }
-
-    /// <summary>Ordered fast model candidates: haiku → gpt-4o-mini → llama3.2</summary>
-    public static IChatClient? ResolveFast(IServiceProvider services) =>
-        ResolveFirst(services, Models.Fast, Models.OpenAiFast, Models.Local);
-
-    /// <summary>Ordered balanced model candidates: sonnet → gpt-4o → llama3.2</summary>
-    public static IChatClient? ResolveBalanced(IServiceProvider services) =>
-        ResolveFirst(services, Models.Balanced, Models.OpenAiBalanced, Models.Local);
 
 }
 
@@ -181,6 +246,44 @@ internal sealed class ModelBoundChatClient(IChatClient inner, string modelId) : 
 
     public object? GetService(Type serviceType, object? key = null)
         => inner.GetService(serviceType, key);
+
+    public void Dispose() { }
+}
+
+/// <summary>
+/// Singleton alias client for a tier ("fast" or "balanced").
+/// Resolves the backing IChatClient from ModelSelectionService on every call
+/// so that runtime model changes take effect without restarting.
+/// Being a singleton prevents DI from disposing the underlying provider clients.
+/// </summary>
+internal sealed class DynamicTierChatClient(
+    string tier,
+    ModelSelectionService selection,
+    IServiceProvider services) : IChatClient
+{
+    private IChatClient Current
+    {
+        get
+        {
+            var key = tier == "fast" ? selection.Fast : selection.Balanced;
+            return (services as IKeyedServiceProvider)!.GetRequiredKeyedService<IChatClient>(key);
+        }
+    }
+
+    public Task<ChatResponse> GetResponseAsync(
+        IEnumerable<ChatMessage> messages,
+        ChatOptions? options = null,
+        CancellationToken ct = default)
+        => Current.GetResponseAsync(messages, options, ct);
+
+    public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+        IEnumerable<ChatMessage> messages,
+        ChatOptions? options = null,
+        CancellationToken ct = default)
+        => Current.GetStreamingResponseAsync(messages, options, ct);
+
+    public object? GetService(Type serviceType, object? key = null)
+        => Current.GetService(serviceType, key);
 
     public void Dispose() { }
 }

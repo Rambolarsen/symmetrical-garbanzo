@@ -28,6 +28,7 @@ builder.Services.AddAgentProviders(builder.Configuration);
 
 builder.Services.AddScoped<PrePlanningService>();
 builder.Services.AddScoped<PlanningService>();
+builder.Services.AddScoped<TaskChatService>();
 builder.Services.AddScoped<VerificationService>();
 builder.Services.AddHttpClient<RepoContextService>(client =>
 {
@@ -64,6 +65,28 @@ app.MapOpenApi();
 // Health endpoints (Aspire convention)
 app.MapGet("/health", () => Results.Ok("Healthy")).ExcludeFromDescription();
 app.MapGet("/alive", () => Results.Ok("Alive")).ExcludeFromDescription();
+
+// Model selection — get and update fast/balanced tier assignments
+app.MapGet("/models", (ModelSelectionService sel) =>
+    Results.Ok(new { fast = sel.Fast, balanced = sel.Balanced, available = sel.Available }))
+    .ExcludeFromDescription();
+
+app.MapPut("/models", (ModelUpdateRequest req, ModelSelectionService sel) =>
+{
+    if (req.Fast is not null)
+    {
+        if (!sel.Available.Contains(req.Fast))
+            return Results.BadRequest($"Model '{req.Fast}' is not registered. Available: {string.Join(", ", sel.Available)}");
+        sel.Fast = req.Fast;
+    }
+    if (req.Balanced is not null)
+    {
+        if (!sel.Available.Contains(req.Balanced))
+            return Results.BadRequest($"Model '{req.Balanced}' is not registered. Available: {string.Join(", ", sel.Available)}");
+        sel.Balanced = req.Balanced;
+    }
+    return Results.Ok(new { fast = sel.Fast, balanced = sel.Balanced, available = sel.Available });
+}).ExcludeFromDescription();
 
 // Ollama health — checks reachability and lists available models
 app.MapGet("/health/ollama", async (IConfiguration config, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
@@ -182,3 +205,5 @@ file static class OllamaLaunchState
 {
     public static volatile bool IsLaunching;
 }
+
+record ModelUpdateRequest(string? Fast, string? Balanced);

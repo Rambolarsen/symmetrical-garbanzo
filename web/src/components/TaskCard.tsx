@@ -8,6 +8,8 @@ interface Props {
   task: Task
   onClick?: () => void
   onEdit?: () => void
+  onChat?: () => void
+  onDebug?: () => void
   onCancel?: () => void  // cancel in-flight analysis and return to backlog
   subTaskCount?: number  // number of promoted sub-tasks belonging to this card
   onPrePlanAll?: () => void  // pre-plan all eligible children at once
@@ -29,7 +31,24 @@ const SEVERITY_COLOR: Record<string, string> = {
   critical: 'text-red-400',
 }
 
-export function TaskCard({ task, onClick, onEdit, onCancel, subTaskCount = 0, onPrePlanAll, onViewSpec }: Props) {
+function shortModelName(model: string): string {
+  if (model.startsWith('claude-')) {
+    const normalized = model.replace(/^claude-/, '').replace(/-\d{10,}$/, '')
+    const [tier] = normalized.split('-')
+    return tier.charAt(0).toUpperCase() + tier.slice(1)
+  }
+  return model
+}
+
+function fallbackLoadingMessage(task: Task): string {
+  return task.column === 'pre-planning' ? 'Analyzing complexity…'
+    : task.column === 'planning' ? 'Building work breakdown…'
+    : task.column === 'in-development' ? 'Executing planned work packages…'
+    : task.column === 'verification' ? 'Verifying against criteria…'
+    : 'Processing…'
+}
+
+export function TaskCard({ task, onClick, onEdit, onChat, onDebug, onCancel, subTaskCount = 0, onPrePlanAll, onViewSpec }: Props) {
   const [errorExpanded, setErrorExpanded] = useState(false)
   const [copied, setCopied] = useState(false)
 
@@ -53,6 +72,7 @@ export function TaskCard({ task, onClick, onEdit, onCancel, subTaskCount = 0, on
   }
 
   const pre = task.prePlanningResult
+  const progress = task.planningProgress
 
   return (
     <div
@@ -109,12 +129,14 @@ export function TaskCard({ task, onClick, onEdit, onCancel, subTaskCount = 0, on
       {task.loading && (
         <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
           <span className="inline-block w-3 h-3 border-2 border-slate-400 border-t-transparent rounded-full animate-spin shrink-0" />
-          <span className="flex-1">
-            {task.column === 'pre-planning' ? 'Analyzing complexity…'
-              : task.column === 'planning' ? 'Building work breakdown…'
-              : task.column === 'in-development' ? 'Executing planned work packages…'
-              : task.column === 'verification' ? 'Verifying against criteria…'
-              : 'Processing…'}
+          <span className="flex-1 min-w-0">
+            <span className="block truncate">{progress?.message ?? fallbackLoadingMessage(task)}</span>
+            {progress?.model && (
+              <span className="block truncate text-[11px] text-slate-500">
+                {progress.tier ? `${progress.tier} · ` : ''}{shortModelName(progress.model)}
+                {progress.elapsedMs != null && progress.elapsedMs >= 1000 ? ` · ${Math.floor(progress.elapsedMs / 1000)}s` : ''}
+              </span>
+            )}
           </span>
           {onCancel && (
             <button
@@ -272,8 +294,37 @@ export function TaskCard({ task, onClick, onEdit, onCancel, subTaskCount = 0, on
       )}
 
       {/* Footer actions */}
-      {!task.loading && (onEdit || onViewSpec) && (
+      {(onEdit || onViewSpec || onChat || onDebug) && (
         <div className="mt-2 pt-2 border-t border-slate-600/60 flex items-center gap-1">
+          {onChat && (
+            <button
+              type="button"
+              title="Discuss and refine the spec"
+              onPointerDown={e => e.stopPropagation()}
+              onClick={e => { e.stopPropagation(); onChat() }}
+              className="p-1 rounded text-blue-300 hover:text-white hover:bg-blue-700/60 transition-colors"
+              aria-label="Open task chat"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+              </svg>
+            </button>
+          )}
+          {onDebug && (
+            <button
+              type="button"
+              title="View raw model debug data"
+              onPointerDown={e => e.stopPropagation()}
+              onClick={e => { e.stopPropagation(); onDebug() }}
+              className="p-1 rounded text-purple-300 hover:text-white hover:bg-purple-700/60 transition-colors"
+              aria-label="Open debug data"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="4 17 10 11 4 5"/>
+                <line x1="12" y1="19" x2="20" y2="19"/>
+              </svg>
+            </button>
+          )}
           {onEdit && (
             <button
               type="button"

@@ -110,6 +110,33 @@ export interface PlanningResult {
   executionPlan: ExecutionPhase[];
 }
 
+export interface PlanningProgress {
+  type: 'progress' | 'retry';
+  message: string;
+  phase?: 'pre-planning' | 'planning' | string;
+  tier?: 'fast' | 'balanced' | string;
+  model?: string;
+  elapsedMs?: number;
+  attempt?: number;
+  maxAttempts?: number;
+  issues?: string[];
+}
+
+export interface ModelOutputDelta {
+  text: string;
+  phase?: 'pre-planning' | 'planning' | string;
+  tier?: 'fast' | 'balanced' | string;
+  model?: string;
+  elapsedMs?: number;
+}
+
+export interface TaskChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  createdAt: string;
+}
+
 // ---------------------------------------------------------------------------
 // SSE execution streaming
 // ---------------------------------------------------------------------------
@@ -157,6 +184,13 @@ export interface Task {
   error?: string;
   prePlanningResult?: PrePlanningResult;
   planningResult?: PlanningResult;
+  planningProgress?: PlanningProgress;   // ephemeral progress metadata during pre-plan/plan
+  planningTranscript?: string;           // raw streamed model output during pre-plan/plan
+  chatMessages?: TaskChatMessage[];
+  chatProgress?: PlanningProgress;
+  chatLoading?: boolean;
+  chatError?: string;
+  specDirtyFromChat?: boolean;
   executionOutput?: string;              // accumulated SSE stream text
   pendingClarification?: ClarificationRequest;
   verificationResult?: VerificationResult;

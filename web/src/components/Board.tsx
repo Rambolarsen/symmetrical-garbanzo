@@ -2,7 +2,7 @@ import { useState, useCallback, useRef } from 'react'
 import { DndContext, DragEndEvent, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import { COLUMNS } from '../types'
 import type { Task, ColumnId, PrePlanningResult, PlanningResult, WBSElement } from '../types'
-import { loadSerenaContext, prePlan, plan, sendClarification, streamExecution, verify } from '../api/client'
+import { loadSerenaContext, streamPrePlan, streamPlan, streamTaskChat, sendClarification, streamExecution, verify } from '../api/client'
 import { Column } from './Column'
 import { DecisionGateModal } from './DecisionGateModal'
 import { PlanningResultModal } from './PlanningResultModal'
@@ -11,9 +11,13 @@ import { ClarificationModal } from './ClarificationModal'
 import { ProjectSetupModal } from './ProjectSetupModal'
 import { AddTaskModal } from './AddTaskModal'
 import { SpecModal } from './SpecModal'
+import { LiveModelOutputModal } from './LiveModelOutputModal'
+import { TaskChatModal } from './TaskChatModal'
 import { useTasks } from '../store/tasks'
 import { useProjectContext } from '../store/project'
 import { OllamaStatus } from './OllamaStatus'
+import { ModelSelector } from './ModelSelector'
+import { sanitizeSectionContent } from '../lib/specUtils'
 
 // ---------------------------------------------------------------------------
 // Spec section builders — merge structured markdown into the living spec
@@ -21,7 +25,8 @@ import { OllamaStatus } from './OllamaStatus'
 
 function buildPrePlanningSection(result: PrePlanningResult): string {
   const lines: string[] = ['## Pre-Planning Analysis', '']
-  lines.push(`**Specification:** ${result.specification}`, '')
+  lines.push('**Specification:**')
+  lines.push(sanitizeSectionContent(result.specification), '')
   lines.push(`**Complexity:** ${result.complexityScore}/100 (${result.complexityLevel}) · ${result.estimatedHours}h · $${result.estimatedCost.toFixed(2)}`, '')
   if (result.successCriteria.length > 0) {
     lines.push('**Success Criteria:**')
@@ -50,7 +55,8 @@ function buildPlanningSection(result: PlanningResult): string {
   const byId = new Map(result.wbs.elements.map(element => [element.id, element]))
   const wps = result.wbs.elements.filter(e => e.isWorkPackage)
   const lines: string[] = ['## Planning Specification', '']
-  lines.push(`**Specification:** ${result.specification}`, '')
+  lines.push('**Specification:**')
+  lines.push(sanitizeSectionContent(result.specification), '')
 
   lines.push('**Planning Summary:**')
   lines.push(`- Work packages: ${wps.length}`)
@@ -245,6 +251,15 @@ export function Board() {
     setPrePlanning, setPlanning,
     appendExecutionOutput, setClarification, clearClarification, setVerification,
     setSpec, upsertSpec, setDerivedFrom,
+    setPlanningProgress,
+    appendPlanningTranscript,
+    appendChatMessage,
+    appendChatAssistantDelta,
+    setChatLoading,
+    setChatError,
+    setChatProgress,
+    markSpecDirtyFromChat,
+    applyChatClarification,
   } = useTasks()
   const { project, setProject } = useProjectContext()
   const [gateTask, setGateTask] = useState<Task | null>(null)
@@ -252,12 +267,14 @@ export function Board() {
   const [pendingPlanTask, setPendingPlanTask] = useState<Task | null>(null)
   const [verifyTask, setVerifyTask] = useState<Task | null>(null)
   const [specTask, setSpecTask] = useState<Task | null>(null)
+  const [liveOutputTaskId, setLiveOutputTaskId] = useState<string | null>(null)
+  const [chatTaskId, setChatTaskId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [editTask, setEditTask] = useState<Task | null>(null)
   const [editProject, setEditProject] = useState(false)
   const [verifyLoading, _setVerifyLoading] = useState(false)
   const [clarifyLoading, setClarifyLoading] = useState(false)
-  const [toast, setToast] = useState<string | null>(null)
+  const [toast, setToast] = useState<{ message: string; variant: 'error' | 'success' } | null>(null)
   const abortStreams = useRef(new Map<string, () => void>())
   const cancelledExecution = useRef(new Set<string>())
   // Map of taskId → AbortController for in-flight pre-plan / plan requests
@@ -265,13 +282,87 @@ export function Board() {
 
   const buildContext = useCallback(() => project?.generatedContext ?? '', [project])
 
-  const showToast = useCallback((msg: string) => {
-    setToast(msg)
+  const showToast = useCallback((msg: string, variant: 'error' | 'success' = 'error') => {
+    setToast({ message: msg, variant })
   }, [])
+
+  const shouldEnableSpecChat = useCallback((task: Task) =>
+    task.column === 'pre-planning' || task.column === 'planning',
+  [])
+
+  const shouldShowDebug = useCallback((task: Task) =>
+    shouldEnableSpecChat(task) && (task.loading || !!task.planningTranscript),
+  [shouldEnableSpecChat])
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
   )
+
+  const runPrePlanningTask = useCallback(async (task: Task, fallbackColumn: ColumnId = task.column) => {
+    moveTask(task.id, 'pre-planning')
+    setLoading(task.id, true)
+    const controller = new AbortController()
+    abortAnalysis.current.set(task.id, controller)
+
+    try {
+      const currentSpec = tasks.find(t => t.id === task.id)?.spec ?? task.spec
+      const result = await streamPrePlan(
+        currentSpec,
+        buildContext(),
+        controller.signal,
+        (msg) => setPlanningProgress(task.id, msg),
+        (delta) => appendPlanningTranscript(task.id, delta.text)
+      )
+      setPrePlanning(task.id, result)
+      upsertSpec(task.id, buildPrePlanningSection(result))
+      markSpecDirtyFromChat(task.id, false)
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') return
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(task.id, msg)
+      moveTask(task.id, fallbackColumn)
+      showToast(`Pre-planning failed: ${msg}`)
+    } finally {
+      abortAnalysis.current.delete(task.id)
+    }
+  }, [tasks, moveTask, setLoading, buildContext, setPlanningProgress, appendPlanningTranscript, setPrePlanning, upsertSpec, markSpecDirtyFromChat, setError, showToast])
+
+  const runPlanningTask = useCallback(async (task: Task, fallbackColumn: ColumnId = task.column) => {
+    if (!task.prePlanningResult) {
+      showToast('Planning requires a pre-planning result first.')
+      return
+    }
+
+    moveTask(task.id, 'planning')
+    setLoading(task.id, true)
+    const controller = new AbortController()
+    abortAnalysis.current.set(task.id, controller)
+
+    try {
+      const currentSpec = tasks.find(t => t.id === task.id)?.spec ?? task.spec
+      const result = await streamPlan(
+        currentSpec,
+        task.prePlanningResult,
+        buildContext(),
+        project?.source,
+        controller.signal,
+        (msg) => setPlanningProgress(task.id, msg),
+        (delta) => appendPlanningTranscript(task.id, delta.text)
+      )
+      logMissingAssignedAgents(result)
+      setPlanning(task.id, result)
+      upsertSpec(task.id, buildPlanningSection(result))
+      markSpecDirtyFromChat(task.id, false)
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') return
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(task.id, msg)
+      moveTask(task.id, fallbackColumn)
+      showToast(`Planning failed: ${msg}`)
+    } finally {
+      abortAnalysis.current.delete(task.id)
+    }
+  }, [tasks, moveTask, setLoading, buildContext, project, setPlanningProgress, appendPlanningTranscript, setPlanning, upsertSpec, markSpecDirtyFromChat, setError, showToast])
 
   const runWorkPackageExecution = useCallback((
     parentTaskId: string,
@@ -438,25 +529,8 @@ export function Board() {
 
     // backlog → pre-planning
     if (task.column === 'backlog' && targetCol === 'pre-planning') {
-      moveTask(taskId, 'pre-planning')
-      setLoading(taskId, true)
-      const controller = new AbortController()
-      abortAnalysis.current.set(taskId, controller)
-      try {
-        console.log('[pre-planning] calling API...')
-        const result = await prePlan(task.spec, buildContext(), controller.signal)
-        setPrePlanning(taskId, result)
-        upsertSpec(taskId, buildPrePlanningSection(result))
-      } catch (err) {
-        if ((err as Error).name === 'AbortError') return
-        const msg = err instanceof Error ? err.message : String(err)
-        console.error('[pre-planning] failed:', msg)
-        setError(taskId, msg)
-        moveTask(taskId, 'backlog')
-        showToast(`Pre-planning failed: ${msg}`)
-      } finally {
-        abortAnalysis.current.delete(taskId)
-      }
+      console.log('[pre-planning] calling API...')
+      await runPrePlanningTask(task, 'backlog')
       return
     }
 
@@ -497,35 +571,16 @@ export function Board() {
     }
 
     // All other drops are ignored (card snaps back)
-  }, [tasks, moveTask, setLoading, setError, setPrePlanning, setPlanning, setVerification, showToast, buildContext, upsertSpec, handleStartDevelopment])
+  }, [tasks, moveTask, setPlanning, setVerification, handleStartDevelopment, runPrePlanningTask])
 
   // ---------------------------------------------------------------------------
   // Decision gate actions
   // ---------------------------------------------------------------------------
   const handleGateApprove = useCallback(async () => {
     if (!gateTask) return
-    moveTask(gateTask.id, 'planning')
-    setLoading(gateTask.id, true)
     setGateTask(null)
-    const controller = new AbortController()
-    abortAnalysis.current.set(gateTask.id, controller)
-    try {
-      // Read spec fresh from store — it was updated by upsertSpec after pre-planning
-      const currentSpec = tasks.find(t => t.id === gateTask.id)?.spec ?? gateTask.spec
-      const result = await plan(currentSpec, gateTask.prePlanningResult!, buildContext(), project?.source, controller.signal)
-      logMissingAssignedAgents(result)
-      setPlanning(gateTask.id, result)
-      upsertSpec(gateTask.id, buildPlanningSection(result))
-    } catch (err) {
-      if ((err as Error).name === 'AbortError') return
-      const msg = err instanceof Error ? err.message : String(err)
-      setError(gateTask.id, msg)
-      moveTask(gateTask.id, 'pre-planning')
-      showToast(`Planning failed: ${msg}`)
-    } finally {
-      abortAnalysis.current.delete(gateTask.id)
-    }
-  }, [gateTask, tasks, moveTask, setLoading, setError, setPlanning, buildContext, upsertSpec])
+    await runPlanningTask(gateTask, 'pre-planning')
+  }, [gateTask, runPlanningTask])
 
   const handlePromoteWorkPackages = useCallback((parentTask: Task) => {
     const wps = parentTask.planningResult?.wbs.elements.filter(e => e.isWorkPackage) ?? []
@@ -567,23 +622,14 @@ export function Board() {
     // Move all to pre-planning first so the UI updates immediately
     eligible.forEach(t => { moveTask(t.id, 'pre-planning'); setLoading(t.id, true) })
     await Promise.all(eligible.map(async t => {
-      const controller = new AbortController()
-      abortAnalysis.current.set(t.id, controller)
       try {
-        const result = await prePlan(t.spec, buildContext(), controller.signal)
-        setPrePlanning(t.id, result)
-        upsertSpec(t.id, buildPrePlanningSection(result))
+        await runPrePlanningTask(t, 'backlog')
       } catch (err) {
-        if ((err as Error).name === 'AbortError') return
         const msg = err instanceof Error ? err.message : String(err)
-        setError(t.id, msg)
-        moveTask(t.id, 'backlog')
         showToast(`Pre-planning failed for "${t.title}": ${msg}`)
-      } finally {
-        abortAnalysis.current.delete(t.id)
       }
     }))
-  }, [moveTask, setLoading, setError, setPrePlanning, buildContext, upsertSpec, showToast])
+  }, [moveTask, setLoading, runPrePlanningTask, showToast])
 
   const handleGateSkip = useCallback(() => {
     if (!gateTask) return
@@ -631,6 +677,71 @@ export function Board() {
     }
   }, [tasks, clearClarification, setLoading, showToast])
 
+  const handleTaskChatSend = useCallback((taskId: string, content: string) => {
+    const task = tasks.find(t => t.id === taskId)
+    if (!task || task.chatLoading || !shouldEnableSpecChat(task)) return
+
+    const userMessage = {
+      id: `chat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      role: 'user' as const,
+      content,
+      createdAt: new Date().toISOString(),
+    }
+
+    appendChatMessage(taskId, userMessage)
+    setChatLoading(taskId, true)
+    setChatError(taskId, undefined)
+    setChatProgress(taskId, undefined)
+
+    let receivedDelta = false
+    streamTaskChat(
+      {
+        taskTitle: task.title,
+        spec: task.spec,
+        phase: task.column,
+        messages: [...(task.chatMessages ?? []), userMessage],
+        prePlanning: task.prePlanningResult,
+        planning: task.planningResult,
+        transcript: task.planningTranscript,
+      },
+      {
+        onProgress: (progress) => setChatProgress(taskId, progress),
+        onModelDelta: (delta) => {
+          receivedDelta = true
+          appendChatAssistantDelta(taskId, delta.text)
+        },
+        onComplete: (output) => {
+          if (!receivedDelta && output) appendChatAssistantDelta(taskId, output)
+          setChatLoading(taskId, false)
+          setChatProgress(taskId, undefined)
+        },
+        onError: (message) => {
+          setChatError(taskId, message)
+          setChatProgress(taskId, undefined)
+        },
+      }
+    )
+  }, [tasks, shouldEnableSpecChat, appendChatMessage, setChatLoading, setChatError, setChatProgress, appendChatAssistantDelta])
+
+  const handleApplyChatClarification = useCallback((taskId: string, clarification: string) => {
+    applyChatClarification(taskId, clarification)
+    showToast('Clarification added to the spec.', 'success')
+  }, [applyChatClarification, showToast])
+
+  const handleRerunFromChat = useCallback(async (taskId: string) => {
+    const task = tasks.find(t => t.id === taskId)
+    if (!task) return
+
+    if (task.column === 'pre-planning') {
+      await runPrePlanningTask(task, 'pre-planning')
+      return
+    }
+
+    if (task.column === 'planning') {
+      await runPlanningTask(task, 'planning')
+    }
+  }, [tasks, runPrePlanningTask, runPlanningTask])
+
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
@@ -656,6 +767,7 @@ export function Board() {
           )}
         </div>
         <div className="flex items-center gap-4">
+          <ModelSelector />
           <OllamaStatus />
           <button
             onClick={() => setShowAdd(true)}
@@ -680,13 +792,21 @@ export function Board() {
                 tasks={tasks.filter(t => t.column === col.id)}
                 allTasks={tasks}
                 onPrePlanAll={handlePrePlanAll}
+                canChatTask={shouldEnableSpecChat}
+                canDebugTask={shouldShowDebug}
                 onCardClick={
                   col.id === 'backlog'
                     ? (task) => setSpecTask(task)
                     : col.id === 'pre-planning'
-                    ? (task) => { if (task.prePlanningResult && !task.loading) setGateTask(task) }
+                    ? (task) => {
+                        if (task.loading) setLiveOutputTaskId(task.id)
+                        else if (task.prePlanningResult) setGateTask(task)
+                      }
                     : col.id === 'planning'
-                    ? (task) => { if (task.planningResult) setPlanDetailTask(task) }
+                    ? (task) => {
+                        if (task.loading) setLiveOutputTaskId(task.id)
+                        else if (task.planningResult) setPlanDetailTask(task)
+                      }
                     : col.id === 'verification'
                     ? (task) => { if (task.verificationResult) setVerifyTask(task) }
                     : (col.id === 'in-development' || col.id === 'done')
@@ -694,6 +814,8 @@ export function Board() {
                     : undefined
                 }
                 onEditTask={(task) => setEditTask(task)}
+                onChatTask={(task) => setChatTaskId(task.id)}
+                onDebugTask={(task) => setLiveOutputTaskId(task.id)}
                 onCancelTask={(task) => handleCancelTask(task.id, task.column)}
                 onViewSpec={(task) => setSpecTask(task)}
               />
@@ -705,23 +827,33 @@ export function Board() {
       {/* Toast */}
       {toast && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 max-w-lg w-full px-4">
-          <div className="bg-red-900 border border-red-700 text-red-200 text-sm rounded-xl px-4 py-3 shadow-2xl">
-            <div className="flex items-start gap-3">
-              <span className="text-red-400 mt-0.5 shrink-0">⚠</span>
-              <div className="flex-1 min-w-0 max-h-48 overflow-y-auto">
-                <p className="break-all font-mono text-xs leading-relaxed select-text">{toast}</p>
+          {toast.variant === 'success' ? (
+            <div className="bg-green-900 border border-green-700 text-green-200 text-sm rounded-xl px-4 py-3 shadow-2xl">
+              <div className="flex items-center gap-3">
+                <span className="text-green-400 shrink-0">✓</span>
+                <p className="flex-1 min-w-0 font-mono text-xs leading-relaxed">{toast.message}</p>
+                <button onClick={() => setToast(null)} className="text-green-400 hover:text-white ml-2 shrink-0 text-lg leading-none">×</button>
               </div>
-              <button onClick={() => setToast(null)} className="text-red-400 hover:text-white ml-2 shrink-0 text-lg leading-none">×</button>
             </div>
-            <div className="flex gap-3 mt-2 pl-5">
-              <button
-                onClick={() => navigator.clipboard.writeText(toast)}
-                className="text-xs text-red-400 hover:text-red-200 transition-colors"
-              >
-                Copy error
-              </button>
+          ) : (
+            <div className="bg-red-900 border border-red-700 text-red-200 text-sm rounded-xl px-4 py-3 shadow-2xl">
+              <div className="flex items-start gap-3">
+                <span className="text-red-400 mt-0.5 shrink-0">⚠</span>
+                <div className="flex-1 min-w-0 max-h-48 overflow-y-auto">
+                  <p className="break-all font-mono text-xs leading-relaxed select-text">{toast.message}</p>
+                </div>
+                <button onClick={() => setToast(null)} className="text-red-400 hover:text-white ml-2 shrink-0 text-lg leading-none">×</button>
+              </div>
+              <div className="flex gap-3 mt-2 pl-5">
+                <button
+                  onClick={() => navigator.clipboard.writeText(toast.message)}
+                  className="text-xs text-red-400 hover:text-red-200 transition-colors"
+                >
+                  Copy error
+                </button>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       )}
 
@@ -788,6 +920,29 @@ export function Board() {
           onClose={() => setSpecTask(null)}
         />
       )}
+      {chatTaskId && (() => {
+        const chatTask = tasks.find(t => t.id === chatTaskId)
+        if (!chatTask) return null
+        return (
+          <TaskChatModal
+            task={chatTask}
+            onClose={() => setChatTaskId(null)}
+            onSend={(message) => handleTaskChatSend(chatTask.id, message)}
+            onApplyClarification={(clarification) => handleApplyChatClarification(chatTask.id, clarification)}
+            onRerun={shouldEnableSpecChat(chatTask) ? () => void handleRerunFromChat(chatTask.id) : undefined}
+          />
+        )
+      })()}
+      {liveOutputTaskId && (() => {
+        const liveTask = tasks.find(t => t.id === liveOutputTaskId)
+        if (!liveTask) return null
+        return (
+          <LiveModelOutputModal
+            task={liveTask}
+            onClose={() => setLiveOutputTaskId(null)}
+          />
+        )
+      })()}
       {showAdd && (
         <AddTaskModal
           projectPrefix={project ? `## Project\n\n**${project.name}**\n${project.source}` : undefined}

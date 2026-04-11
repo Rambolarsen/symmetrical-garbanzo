@@ -160,6 +160,7 @@ public class PlanningService(IServiceProvider services)
         string task,
         PrePlanningResult? prePlanning = null,
         string? context = null,
+        Func<PlanProgressEvent, CancellationToken, Task>? onProgress = null,
         CancellationToken ct = default)
     {
         if (chatClient is null)
@@ -171,7 +172,15 @@ public class PlanningService(IServiceProvider services)
 
         for (var attempt = 1; attempt <= MaxPlanningAttempts; attempt++)
         {
-            var dto = await RequestPlanningDtoAsync(prompt, ct);
+            if (onProgress is not null)
+                await onProgress(new PlanProgressEvent("progress",
+                    $"Decomposing task into work packages… (attempt {attempt}/{MaxPlanningAttempts})",
+                    Phase: "planning",
+                    Tier: "balanced",
+                    Attempt: attempt,
+                    MaxAttempts: MaxPlanningAttempts), ct);
+
+            var dto = await RequestPlanningDtoAsync(prompt, onProgress, ct);
             issues = ValidatePlanningResponse(dto);
 
             if (issues.Count == 0)
@@ -182,7 +191,16 @@ public class PlanningService(IServiceProvider services)
                 string.Join(" | ", issues.Take(8)));
 
             if (attempt < MaxPlanningAttempts)
+            {
+                if (onProgress is not null)
+                    await onProgress(new PlanProgressEvent("retry",
+                        Phase: "planning",
+                        Tier: "balanced",
+                        Attempt: attempt, MaxAttempts: MaxPlanningAttempts,
+                        Issues: issues.Take(8).ToList()), ct);
+
                 prompt = BuildRetryPrompt(basePrompt, issues);
+            }
         }
 
         throw new InvalidOperationException(
@@ -250,18 +268,18 @@ public class PlanningService(IServiceProvider services)
         return sb.ToString();
     }
 
-    private async Task<PlanningResponseDto> RequestPlanningDtoAsync(string prompt, CancellationToken ct)
+    private async Task<PlanningResponseDto> RequestPlanningDtoAsync(
+        string prompt,
+        Func<PlanProgressEvent, CancellationToken, Task>? onProgress,
+        CancellationToken ct)
     {
         if (chatClient is null)
             throw new InvalidOperationException("No LLM provider available. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or start Ollama (ollama serve).");
 
-        ChatResponse response;
+        string responseText;
         try
         {
-            response = await chatClient.GetResponseAsync(
-                [new ChatMessage(ChatRole.System, SystemPrompt),
-                 new ChatMessage(ChatRole.User, prompt)],
-                cancellationToken: ct);
+            responseText = await RequestPrimaryTextAsync(prompt, onProgress, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -270,7 +288,7 @@ public class PlanningService(IServiceProvider services)
                 ex);
         }
 
-        var json = await ExtractValidJsonAsync(response.Text, ct);
+        var json = await ExtractValidJsonAsync(responseText, onProgress, ct);
 
         return JsonSerializer.Deserialize<PlanningResponseDto>(json, JsonOptions)
             ?? throw new InvalidOperationException("LLM returned null planning response.");
@@ -502,7 +520,10 @@ public class PlanningService(IServiceProvider services)
         return sb.ToString();
     }
 
-    private async Task<string> ExtractValidJsonAsync(string raw, CancellationToken ct)
+    private async Task<string> ExtractValidJsonAsync(
+        string raw,
+        Func<PlanProgressEvent, CancellationToken, Task>? onProgress,
+        CancellationToken ct)
     {
         var json = ExtractJson(raw);
 
@@ -513,6 +534,13 @@ public class PlanningService(IServiceProvider services)
         }
         catch (JsonException firstEx)
         {
+            if (onProgress is not null)
+                await onProgress(new PlanProgressEvent(
+                    "progress",
+                    "Repairing malformed JSON…",
+                    Phase: "planning",
+                    Tier: "balanced"), ct);
+
             var repaired = await RepairJsonAsync(raw, ct);
 
             try
@@ -529,6 +557,56 @@ public class PlanningService(IServiceProvider services)
             }
         }
     }
+
+    private async Task<string> RequestPrimaryTextAsync(
+        string prompt,
+        Func<PlanProgressEvent, CancellationToken, Task>? onProgress,
+        CancellationToken ct)
+    {
+        if (chatClient is null)
+            throw new InvalidOperationException("No LLM provider available.");
+
+        var messages = new[]
+        {
+            new ChatMessage(ChatRole.System, SystemPrompt),
+            new ChatMessage(ChatRole.User, prompt),
+        };
+
+        try
+        {
+            var sb = new System.Text.StringBuilder();
+            await foreach (var update in chatClient.GetStreamingResponseAsync(messages, cancellationToken: ct).WithCancellation(ct))
+            {
+                if (string.IsNullOrEmpty(update.Text)) continue;
+
+                sb.Append(update.Text);
+                if (onProgress is not null)
+                    await onProgress(new PlanProgressEvent(
+                        "model_delta",
+                        Text: update.Text,
+                        Phase: "planning",
+                        Tier: "balanced"), ct);
+            }
+
+            return sb.ToString();
+        }
+        catch (Exception ex) when (IsStreamingUnsupported(ex))
+        {
+            var response = await chatClient.GetResponseAsync(messages, cancellationToken: ct);
+            if (onProgress is not null && !string.IsNullOrEmpty(response.Text))
+                await onProgress(new PlanProgressEvent(
+                    "model_delta",
+                    Text: response.Text,
+                    Phase: "planning",
+                    Tier: "balanced"), ct);
+            return response.Text;
+        }
+    }
+
+    private static bool IsStreamingUnsupported(Exception ex) =>
+        ex is NotSupportedException ||
+        (ex.Message.Contains("stream", StringComparison.OrdinalIgnoreCase) &&
+         ex.Message.Contains("not supported", StringComparison.OrdinalIgnoreCase));
 
     private async Task<string> RepairJsonAsync(string raw, CancellationToken ct)
     {

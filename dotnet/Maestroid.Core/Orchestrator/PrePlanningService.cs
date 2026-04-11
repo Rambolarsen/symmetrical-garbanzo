@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
@@ -12,6 +13,7 @@ namespace Maestroid.Core.Orchestrator;
 
 public record AgentRole(string Name, string Instructions);
 
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum ComplexityLevel { Trivial, Simple, Moderate, Complex, Enterprise }
 
 public record Risk(string Description, string Severity, string Mitigation);
@@ -130,7 +132,11 @@ public class PrePlanningService(IServiceProvider services)
         - Do not add commentary
         """;
 
-    public async Task<PrePlanningResult> RunAsync(string task, string? context = null, CancellationToken ct = default)
+    public async Task<PrePlanningResult> RunAsync(
+        string task,
+        string? context = null,
+        Func<PlanProgressEvent, CancellationToken, Task>? onProgress = null,
+        CancellationToken ct = default)
     {
         var prompt = string.IsNullOrWhiteSpace(context)
             ? $"TASK SPECIFICATION:\n{task}"
@@ -139,15 +145,19 @@ public class PrePlanningService(IServiceProvider services)
         if (chatClient is null)
             throw new InvalidOperationException("No LLM provider available. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or start Ollama (ollama serve).");
 
-        ChatResponse response;
+        if (onProgress is not null)
+            await onProgress(new PlanProgressEvent(
+                "progress",
+                "Analyzing task complexity and coherence…",
+                Phase: "pre-planning",
+                Tier: "fast"), ct);
+
+        string responseText;
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(TimeoutSeconds));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         try
         {
-            response = await chatClient.GetResponseAsync(
-                [new ChatMessage(ChatRole.System, SystemPrompt),
-                 new ChatMessage(ChatRole.User, prompt)],
-                cancellationToken: linkedCts.Token);
+            responseText = await RequestPrimaryTextAsync(prompt, onProgress, linkedCts.Token);
         }
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
         {
@@ -160,7 +170,7 @@ public class PrePlanningService(IServiceProvider services)
                 ex);
         }
 
-        using var doc = await ParseJsonDocumentWithRepairAsync(response.Text, ct);
+        using var doc = await ParseJsonDocumentWithRepairAsync(responseText, onProgress, ct);
         var root = doc.RootElement;
 
         var isTaskCoherent = GetBoolean(root, "isTaskCoherent", defaultValue: true);
@@ -332,7 +342,10 @@ public class PrePlanningService(IServiceProvider services)
         CommentHandling = JsonCommentHandling.Skip,
     };
 
-    private async Task<JsonDocument> ParseJsonDocumentWithRepairAsync(string raw, CancellationToken ct)
+    private async Task<JsonDocument> ParseJsonDocumentWithRepairAsync(
+        string raw,
+        Func<PlanProgressEvent, CancellationToken, Task>? onProgress,
+        CancellationToken ct)
     {
         var json = ExtractJson(raw);
 
@@ -342,6 +355,13 @@ public class PrePlanningService(IServiceProvider services)
         }
         catch (JsonException firstEx)
         {
+            if (onProgress is not null)
+                await onProgress(new PlanProgressEvent(
+                    "progress",
+                    "Repairing malformed JSON…",
+                    Phase: "pre-planning",
+                    Tier: "balanced"), ct);
+
             // Pass the already-extracted JSON, not the raw response with prose/fences
             var repaired = await RepairJsonAsync(json, ct);
 
@@ -358,6 +378,56 @@ public class PrePlanningService(IServiceProvider services)
             }
         }
     }
+
+    private async Task<string> RequestPrimaryTextAsync(
+        string prompt,
+        Func<PlanProgressEvent, CancellationToken, Task>? onProgress,
+        CancellationToken ct)
+    {
+        if (chatClient is null)
+            throw new InvalidOperationException("No LLM provider available.");
+
+        var messages = new[]
+        {
+            new ChatMessage(ChatRole.System, SystemPrompt),
+            new ChatMessage(ChatRole.User, prompt),
+        };
+
+        try
+        {
+            var sb = new System.Text.StringBuilder();
+            await foreach (var update in chatClient.GetStreamingResponseAsync(messages, cancellationToken: ct).WithCancellation(ct))
+            {
+                if (string.IsNullOrEmpty(update.Text)) continue;
+
+                sb.Append(update.Text);
+                if (onProgress is not null)
+                    await onProgress(new PlanProgressEvent(
+                        "model_delta",
+                        Text: update.Text,
+                        Phase: "pre-planning",
+                        Tier: "fast"), ct);
+            }
+
+            return sb.ToString();
+        }
+        catch (Exception ex) when (IsStreamingUnsupported(ex))
+        {
+            var response = await chatClient.GetResponseAsync(messages, cancellationToken: ct);
+            if (onProgress is not null && !string.IsNullOrEmpty(response.Text))
+                await onProgress(new PlanProgressEvent(
+                    "model_delta",
+                    Text: response.Text,
+                    Phase: "pre-planning",
+                    Tier: "fast"), ct);
+            return response.Text;
+        }
+    }
+
+    private static bool IsStreamingUnsupported(Exception ex) =>
+        ex is NotSupportedException ||
+        (ex.Message.Contains("stream", StringComparison.OrdinalIgnoreCase) &&
+         ex.Message.Contains("not supported", StringComparison.OrdinalIgnoreCase));
 
     private async Task<string> RepairJsonAsync(string json, CancellationToken ct)
     {
