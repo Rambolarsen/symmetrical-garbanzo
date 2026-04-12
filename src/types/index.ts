@@ -12,6 +12,115 @@ export interface ModelRef {
 }
 
 // ---------------------------------------------------------------------------
+// Model capabilities & catalog
+// ---------------------------------------------------------------------------
+
+export interface ModelCapabilities {
+  contextWindow: number;        // max input tokens
+  maxOutputTokens: number;
+  supportsToolUse: boolean;
+  supportsVision: boolean;
+  supportsStreaming: boolean;
+  costPerInputToken: number;    // USD per token, 0 for local
+  costPerOutputToken: number;   // USD per token, 0 for local
+  isLocal: boolean;             // true for Ollama-backed models
+  minComplexityScore?: number;  // reject tasks below this (optional floor)
+  maxComplexityScore?: number;  // reject tasks above this (optional ceiling)
+}
+
+export interface ModelEntry extends ModelRef {
+  instanceId: string;        // matches ProviderConfig.id — e.g. "anthropic", "ollama-local", "ollama-remote"
+  capabilities: ModelCapabilities;
+  displayName: string;
+}
+
+/**
+ * Who is consuming the model call.
+ * Drives dynamic adapter selection for Ollama — Claude Code requires
+ * the Anthropic wire protocol; everything else uses OpenAI.
+ */
+export type ConsumerType = "general" | "claude-code" | "opencode" | "codex";
+
+/**
+ * Resolves which wire protocol to use for a given model entry and consumer.
+ * For non-Ollama providers this is trivially the provider name.
+ * For Ollama it depends on the consumer — Claude Code needs the Anthropic surface.
+ */
+export function resolveAdapter(
+  entry: ModelEntry,
+  consumer: ConsumerType
+): "openai" | "anthropic" | "google" {
+  if (entry.provider !== "ollama") {
+    return entry.provider as "openai" | "anthropic" | "google";
+  }
+
+  // Rule: only Claude Code requires the Anthropic wire protocol.
+  // opencode and codex are OpenAI-compatible by design.
+  // All other consumers default to openai.
+  return consumer === "claude-code" ? "anthropic" : "openai";
+}
+
+// For passing Ollama instance config to the discovery function
+export interface OllamaInstanceConfig {
+  instanceId: string;   // matches ProviderConfig.id
+  baseUrl: string;
+  priority: number;
+  // No adapter field — adapter is resolved dynamically per ConsumerType
+}
+
+// ---------------------------------------------------------------------------
+// Provider config (user-defined provider entries)
+// ---------------------------------------------------------------------------
+
+export interface ProviderConfig {
+  id: string;                    // uuid — used as instanceId in ModelEntry and DI key
+  name: string;                  // display name, e.g. "Local Ollama", "Remote GPU Box"
+  provider: ProviderName;        // "anthropic" | "openai" | "google" | "ollama"
+  baseUrl?: string;              // override default endpoint
+  apiKey?: string;               // stored encrypted in DB, never in code
+  isLocal: boolean;
+  enabled: boolean;
+  priority: number;              // lower = higher priority within same provider type
+}
+
+// ---------------------------------------------------------------------------
+// Routing
+// ---------------------------------------------------------------------------
+
+export type ModelTier = "fast" | "balanced" | "powerful";
+
+export interface RoutingContext {
+  complexityScore: number;
+  requiresToolUse?: boolean;
+  requiresVision?: boolean;
+  estimatedInputTokens?: number;
+  preferLocal?: boolean;
+  excludeInstances?: string[];   // instanceIds already tried — prevents retry loops
+  consumer?: ConsumerType;       // drives adapter selection for Ollama; defaults to "general"
+}
+
+// ---------------------------------------------------------------------------
+// Cost tracking
+// ---------------------------------------------------------------------------
+
+export interface ProviderCallRecord {
+  id: string;
+  timestamp: Date;
+  workPackageId?: string;
+  phaseId?: string;
+  instanceId: string;      // which specific instance handled this call
+  provider: ProviderName;
+  model: string;
+  tier: ModelTier;
+  consumer: ConsumerType;  // recorded for auditability
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  durationMs: number;
+  wasEscalated: boolean;   // true if a previous instance was tried and failed
+}
+
+// ---------------------------------------------------------------------------
 // Tool definition (provider-agnostic)
 // ---------------------------------------------------------------------------
 

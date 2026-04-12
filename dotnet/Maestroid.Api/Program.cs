@@ -1,6 +1,9 @@
 using Maestroid.Api.Agents;
+using Maestroid.Core.Data;
 using Maestroid.Core.Orchestrator;
+using Maestroid.Core.Providers;
 using Maestroid.Api.Endpoints;
+using Microsoft.EntityFrameworkCore;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
@@ -17,10 +20,45 @@ builder.Services.AddServiceDiscovery();
 builder.Services.AddHttpClient().AddServiceDiscovery();
 
 // ---------------------------------------------------------------------------
+// Database — switchable between SQLite (dev) and PostgreSQL (production)
+// ---------------------------------------------------------------------------
+
+var dbProvider     = builder.Configuration["DATABASE_PROVIDER"] ?? "sqlite";
+var connectionString = dbProvider == "postgres"
+    ? builder.Configuration["DATABASE_URL"]
+    : "Data Source=masteroid.db";
+
+builder.Services.AddDbContext<MasteroidDbContext>(options =>
+{
+    if (dbProvider == "postgres")
+        options.UseNpgsql(connectionString);
+    else
+        options.UseSqlite(connectionString);
+});
+
+// ---------------------------------------------------------------------------
 // Agent providers (all via IChatClient)
 // ---------------------------------------------------------------------------
 
 builder.Services.AddAgentProviders(builder.Configuration);
+
+// ---------------------------------------------------------------------------
+// Provider registry — capability-aware routing with fallback
+// ---------------------------------------------------------------------------
+
+builder.Services.AddSingleton<IOllamaClientFactory>(sp =>
+{
+    // Snapshot current Ollama configs from DB at startup for the singleton factory.
+    // Configs are reloaded on the next app restart or on catalog invalidation.
+    using var scope = sp.CreateScope();
+    var db      = scope.ServiceProvider.GetRequiredService<MasteroidDbContext>();
+    var configs = db.ProviderConfigs
+        .Where(c => c.Provider == "ollama" && c.Enabled)
+        .ToList();
+    return new OllamaClientFactory(configs);
+});
+
+builder.Services.AddSingleton<IProviderRegistry, ProviderRegistry>();
 
 // ---------------------------------------------------------------------------
 // Orchestration services
@@ -59,6 +97,13 @@ builder.Services
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
+
+// Apply DB migrations on startup
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<MasteroidDbContext>();
+    db.Database.Migrate();
+}
 
 app.MapOpenApi();
 
@@ -197,6 +242,92 @@ app.MapPost("/health/ollama/start", async (IConfiguration config, IHttpClientFac
     }
 }).ExcludeFromDescription();
 
+// ---------------------------------------------------------------------------
+// Provider configs CRUD — sidecar fetches at startup via GET /api/providers
+// ---------------------------------------------------------------------------
+
+app.MapGet("/api/providers", async (MasteroidDbContext db, string? type, CancellationToken ct) =>
+{
+    var query = db.ProviderConfigs.Where(c => c.Enabled);
+    if (!string.IsNullOrWhiteSpace(type))
+        query = query.Where(c => c.Provider == type);
+
+    var configs = await query
+        .OrderBy(c => c.Priority)
+        .Select(c => new
+        {
+            id       = c.Id.ToString(),
+            name     = c.Name,
+            provider = c.Provider,
+            baseUrl  = c.BaseUrl,
+            isLocal  = c.IsLocal,
+            enabled  = c.Enabled,
+            priority = c.Priority,
+            // apiKey intentionally omitted — never returned to clients
+        })
+        .ToListAsync(ct);
+
+    return Results.Ok(configs);
+}).ExcludeFromDescription();
+
+app.MapPost("/api/providers", async (ProviderConfigRequest req, MasteroidDbContext db, CancellationToken ct) =>
+{
+    var entity = new ProviderConfigEntity
+    {
+        Name     = req.Name,
+        Provider = req.Provider,
+        BaseUrl  = req.BaseUrl,
+        IsLocal  = req.IsLocal,
+        Enabled  = req.Enabled,
+        Priority = req.Priority,
+        // apiKey encrypted via Data Protection (not wired here yet — stored as-is for now)
+        EncryptedApiKey = req.ApiKey,
+    };
+
+    db.ProviderConfigs.Add(entity);
+    await db.SaveChangesAsync(ct);
+
+    return Results.Created($"/api/providers/{entity.Id}", new { id = entity.Id.ToString() });
+}).ExcludeFromDescription();
+
+// ---------------------------------------------------------------------------
+// Provider call records — sidecar POSTs here after each trackedGenerate() call
+// ---------------------------------------------------------------------------
+
+app.MapPost("/api/provider-calls", async (ProviderCallRecordRequest req, MasteroidDbContext db, CancellationToken ct) =>
+{
+    var entity = new ProviderCallRecordEntity
+    {
+        Id            = Guid.TryParse(req.Id, out var id) ? id : Guid.NewGuid(),
+        Timestamp     = req.Timestamp,
+        WorkPackageId = req.WorkPackageId,
+        PhaseId       = req.PhaseId,
+        InstanceId    = req.InstanceId,
+        Provider      = req.Provider,
+        Model         = req.Model,
+        Tier          = req.Tier,
+        Consumer      = req.Consumer,
+        InputTokens   = req.InputTokens,
+        OutputTokens  = req.OutputTokens,
+        CostUsd       = (decimal)req.CostUsd,
+        DurationMs    = req.DurationMs,
+        WasEscalated  = req.WasEscalated,
+    };
+
+    db.ProviderCallRecords.Add(entity);
+    await db.SaveChangesAsync(ct);
+
+    return Results.Created($"/api/provider-calls/{entity.Id}", new { id = entity.Id.ToString() });
+}).ExcludeFromDescription();
+
+// User-model overrides endpoint — sidecar fetches custom model entries from DB
+app.MapGet("/api/provider-models", (MasteroidDbContext db) =>
+{
+    // Reserved for future user-defined model overrides (Layer 3 of the catalog).
+    // Returns empty list until the model override feature is implemented.
+    return Results.Ok(Array.Empty<object>());
+}).ExcludeFromDescription();
+
 app.MapOrchestrationEndpoints();
 
 app.Run();
@@ -207,3 +338,30 @@ file static class OllamaLaunchState
 }
 
 record ModelUpdateRequest(string? Fast, string? Balanced);
+
+record ProviderConfigRequest(
+    string Name,
+    string Provider,
+    string? BaseUrl,
+    string? ApiKey,
+    bool IsLocal,
+    bool Enabled,
+    int Priority
+);
+
+record ProviderCallRecordRequest(
+    string Id,
+    DateTime Timestamp,
+    string? WorkPackageId,
+    string? PhaseId,
+    string InstanceId,
+    string Provider,
+    string Model,
+    string Tier,
+    string Consumer,
+    int InputTokens,
+    int OutputTokens,
+    double CostUsd,
+    int DurationMs,
+    bool WasEscalated
+);

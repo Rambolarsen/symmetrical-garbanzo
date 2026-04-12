@@ -1,0 +1,120 @@
+{
+  "models": [
+    {
+      "provider": "anthropic",
+      "instanceId": "anthropic",
+      "model": "claude-haiku-4-5-20251001",
+      "displayName": "Claude Haiku 4.5",
+      "capabilities": {
+        "contextWindow": 200000,
+        "maxOutputTokens": 8192,
+        "supportsToolUse": true,
+        "supportsVision": true,
+        "supportsStreaming": true,
+        "costPerInputToken": 0.0000008,
+        "costPerOutputToken": 0.000004,
+        "isLocal": false,
+        "maxComplexityScore": 50
+      }
+    },
+    {
+      "provider": "anthropic",
+      "instanceId": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "displayName": "Claude Sonnet 4.6",
+      "capabilities": {
+        "contextWindow": 200000,
+        "maxOutputTokens": 64000,
+        "supportsToolUse": true,
+        "supportsVision": true,
+        "supportsStreaming": true,
+        "costPerInputToken": 0.000003,
+        "costPerOutputToken": 0.000015,
+        "isLocal": false
+      }
+    },
+    {
+      "provider": "anthropic",
+      "instanceId": "anthropic",
+      "model": "claude-opus-4-6",
+      "displayName": "Claude Opus 4.6",
+      "capabilities": {
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000,
+        "supportsToolUse": true,
+        "supportsVision": true,
+        "supportsStreaming": true,
+        "costPerInputToken": 0.000015,
+        "costPerOutputToken": 0.000075,
+        "isLocal": false,
+        "minComplexityScore": 60
+      }
+    },
+    {
+      "provider": "openai",
+      "instanceId": "openai",
+      "model": "gpt-4.1-mini",
+      "displayName": "GPT-4.1 Mini",
+      "capabilities": {
+        "contextWindow": 128000,
+        "maxOutputTokens": 16384,
+        "supportsToolUse": true,
+        "supportsVision": true,
+        "supportsStreaming": true,
+        "costPerInputToken": 0.0000004,
+        "costPerOutputToken": 0.0000016,
+        "isLocal": false,
+        "maxComplexityScore": 50
+      }
+    },
+    {
+      "provider": "openai",
+      "instanceId": "openai",
+      "model": "gpt-4.1",
+      "displayName": "GPT-4.1",
+      "capabilities": {
+        "contextWindow": 128000,
+        "maxOutputTokens": 32768,
+        "supportsToolUse": true,
+        "supportsVision": true,
+        "supportsStreaming": true,
+        "costPerInputToken": 0.000002,
+        "costPerOutputToken": 0.000008,
+        "isLocal": false
+      }
+    },
+    {
+      "provider": "google",
+      "instanceId": "google",
+      "model": "gemini-2.0-flash",
+      "displayName": "Gemini 2.0 Flash",
+      "capabilities": {
+        "contextWindow": 1000000,
+        "maxOutputTokens": 8192,
+        "supportsToolUse": true,
+        "supportsVision": true,
+        "supportsStreaming": true,
+        "costPerInputToken": 0.0000001,
+        "costPerOutputToken": 0.0000004,
+        "isLocal": false,
+        "maxComplexityScore": 50
+      }
+    },
+    {
+      "provider": "google",
+      "instanceId": "google",
+      "model": "gemini-2.5-pro",
+      "displayName": "Gemini 2.5 Pro",
+      "capabilities": {
+        "contextWindow": 1000000,
+        "maxOutputTokens": 65536,
+        "supportsToolUse": true,
+        "supportsVision": true,
+        "supportsStreaming": true,
+        "costPerInputToken": 0.00000125,
+        "costPerOutputToken": 0.00001,
+        "isLocal": false
+      }
+    }
+  ]
+}
