@@ -11,7 +11,7 @@ import type {
   ProviderConfig,
   RoutingContext,
 } from "../../types/index.js";
-import { getCatalog } from "./catalog.js";
+import { getCatalog, isOllamaInstance } from "./catalog.js";
 
 const ollama = createOllama();
 
@@ -66,9 +66,11 @@ export function isInstanceAvailable(instanceId: string): boolean {
     case "openai":    return !!process.env.OPENAI_API_KEY;
     case "google":    return !!process.env.GOOGLE_GENERATIVE_AI_API_KEY;
     default:
-      // Ollama instances (e.g. "ollama-local", "ollama-remote") are assumed
-      // reachable — actual network reachability is confirmed on the call attempt.
-      return instanceId.startsWith("ollama");
+      // Ollama instances are assumed reachable — actual network reachability is
+      // confirmed on the call attempt. Use isOllamaInstance() so UUID-based IDs
+      // from the DB (e.g. "00000000-0000-0000-0000-000000000001") are recognised
+      // as well as human-readable names like "ollama-local".
+      return isOllamaInstance(instanceId);
   }
 }
 

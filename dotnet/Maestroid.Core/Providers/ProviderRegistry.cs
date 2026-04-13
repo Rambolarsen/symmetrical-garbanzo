@@ -105,12 +105,13 @@ public class ProviderRegistry : IProviderRegistry
         if (entry.Provider == "ollama")
             return _ollamaFactory.Create(entry.InstanceId, consumer);
 
-        // Cloud providers: resolve by instanceId key registered in DI
+        // Cloud providers: DI keys are model IDs (e.g. "claude-haiku-4-5-20251001"),
+        // matching the registration pattern in AgentProviders.AddAgentProviders().
         if (_serviceProvider is IKeyedServiceProvider keyed)
-            return keyed.GetRequiredKeyedService<IChatClient>(entry.InstanceId);
+            return keyed.GetRequiredKeyedService<IChatClient>(entry.Model);
 
         throw new InvalidOperationException(
-            $"IServiceProvider does not support keyed services. Cannot resolve '{entry.InstanceId}'.");
+            $"IServiceProvider does not support keyed services. Cannot resolve model '{entry.Model}'.");
     }
 
     // ---------------------------------------------------------------------------

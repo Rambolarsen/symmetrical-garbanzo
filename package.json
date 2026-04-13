@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && mkdir -p dist/agents/providers && cp src/agents/providers/model-catalog.json dist/agents/providers/",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "server": "node dist/server.js",

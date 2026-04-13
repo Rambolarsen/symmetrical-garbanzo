@@ -13,6 +13,12 @@ const _rawCatalog = JSON.parse(
 let _catalog: Map<string, ModelEntry> | null = null;
 
 /**
+ * Set of all instanceIds whose provider is "ollama", populated by loadCatalog().
+ * Used by isOllamaInstance() so UUID-based IDs from the DB are recognised.
+ */
+let _ollamaInstanceIds = new Set<string>();
+
+/**
  * Catalog key: `instanceId/model`
  * e.g. "ollama-remote/qwen3.5", "anthropic/claude-sonnet-4-6"
  *
@@ -55,6 +61,15 @@ export function loadCatalog(
   }
 
   _catalog = catalog;
+
+  // Track all Ollama instanceIds so UUID-based IDs from the DB are recognised
+  // by isOllamaInstance() even when the id doesn't start with "ollama".
+  _ollamaInstanceIds = new Set(
+    [...catalog.values()]
+      .filter(e => e.provider === "ollama")
+      .map(e => e.instanceId)
+  );
+
   return catalog;
 }
 
@@ -66,4 +81,14 @@ export function getCatalog(): Map<string, ModelEntry> {
 /** Invalidate cache — call after user updates a DB entry */
 export function invalidateCatalog(): void {
   _catalog = null;
+  _ollamaInstanceIds = new Set();
+}
+
+/**
+ * Returns true if the given instanceId is an Ollama instance.
+ * Checks both the catalog (which handles UUID-based IDs from the DB) and
+ * falls back to a name heuristic for instances not yet in the catalog.
+ */
+export function isOllamaInstance(instanceId: string): boolean {
+  return _ollamaInstanceIds.has(instanceId) || instanceId.startsWith("ollama");
 }

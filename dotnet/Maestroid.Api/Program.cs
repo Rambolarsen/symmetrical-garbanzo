@@ -3,6 +3,7 @@ using Maestroid.Core.Data;
 using Maestroid.Core.Orchestrator;
 using Maestroid.Core.Providers;
 using Maestroid.Api.Endpoints;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -270,18 +271,28 @@ app.MapGet("/api/providers", async (MasteroidDbContext db, string? type, Cancell
     return Results.Ok(configs);
 }).ExcludeFromDescription();
 
-app.MapPost("/api/providers", async (ProviderConfigRequest req, MasteroidDbContext db, CancellationToken ct) =>
+app.MapPost("/api/providers", async (
+    ProviderConfigRequest req,
+    MasteroidDbContext db,
+    IDataProtectionProvider dpProvider,
+    CancellationToken ct) =>
 {
+    string? encryptedKey = null;
+    if (!string.IsNullOrEmpty(req.ApiKey))
+    {
+        var protector = dpProvider.CreateProtector("ProviderApiKey");
+        encryptedKey  = protector.Protect(req.ApiKey);
+    }
+
     var entity = new ProviderConfigEntity
     {
-        Name     = req.Name,
-        Provider = req.Provider,
-        BaseUrl  = req.BaseUrl,
-        IsLocal  = req.IsLocal,
-        Enabled  = req.Enabled,
-        Priority = req.Priority,
-        // apiKey encrypted via Data Protection (not wired here yet — stored as-is for now)
-        EncryptedApiKey = req.ApiKey,
+        Name            = req.Name,
+        Provider        = req.Provider,
+        BaseUrl         = req.BaseUrl,
+        IsLocal         = req.IsLocal,
+        Enabled         = req.Enabled,
+        Priority        = req.Priority,
+        EncryptedApiKey = encryptedKey,
     };
 
     db.ProviderConfigs.Add(entity);
