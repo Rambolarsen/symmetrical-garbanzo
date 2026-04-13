@@ -3,7 +3,6 @@ import http from "http";
 import { createTerminus } from "@godaddy/terminus";
 import { runClaudeCodeAgent } from "./agents/claude-code/agent.js";
 import { runLLMAgent } from "./agents/agent-factory.js";
-import { MODELS } from "./agents/providers/index.js";
 import type { AgentRole, ExecutionStreamEvent, ClarificationRequest } from "./types/index.js";
 
 // ---------------------------------------------------------------------------
@@ -148,7 +147,7 @@ Steps:
 4. Use get_symbols_overview on relevant files
 Return a concise summary (max 2000 chars): file paths and key content excerpts only. No prose.`,
         },
-        model: MODELS.fast,
+        routingContext: { complexityScore: 0 },
         useSerena: true,
         projectPath,
         maxSteps: 8,

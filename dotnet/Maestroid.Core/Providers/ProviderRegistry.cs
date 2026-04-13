@@ -45,7 +45,7 @@ public class ProviderRegistry : IProviderRegistry
 
     public IChatClient ResolveForTask(RoutingContext ctx)
     {
-        var tier       = AssignTier(ctx.ComplexityScore);
+        var tier       = EffectiveTier(ctx);
         var candidates = _catalog[tier];
         var excluded   = ctx.ExcludeInstances?.ToHashSet() ?? [];
 
@@ -70,7 +70,7 @@ public class ProviderRegistry : IProviderRegistry
             return ResolveForTask(ctx with { PreferLocal = false });
 
         throw new InvalidOperationException(
-            $"No suitable provider for complexity={ctx.ComplexityScore}, tier={tier}");
+            $"No suitable provider for complexity={ctx.ComplexityScore}, effectiveTier={tier}");
     }
 
     public bool IsInstanceAvailable(string instanceId) => instanceId switch
@@ -98,6 +98,21 @@ public class ProviderRegistry : IProviderRegistry
         < 65 => ModelTier.Balanced,
         _    => ModelTier.Powerful,
     };
+
+    private static readonly Dictionary<ModelTier, int> TierRank = new()
+    {
+        [ModelTier.Fast]     = 0,
+        [ModelTier.Balanced] = 1,
+        [ModelTier.Powerful] = 2,
+    };
+
+    private static ModelTier EffectiveTier(RoutingContext ctx)
+    {
+        var assigned = AssignTier(ctx.ComplexityScore);
+        if (ctx.MinTier is { } floor && TierRank[assigned] < TierRank[floor])
+            return floor;
+        return assigned;
+    }
 
     private IChatClient BuildClient(ModelEntry entry, ConsumerType consumer)
     {

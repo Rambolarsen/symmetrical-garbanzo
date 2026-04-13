@@ -1,4 +1,4 @@
-import { generateText } from "ai";
+import { generateObject } from "ai";
 import type {
   ModelEntry,
   ProviderCallRecord,
@@ -11,25 +11,30 @@ import { assignTier } from "./index.js";
 import { calculateCallCost } from "./catalog.js";
 
 /**
- * Execute a generateText call with cost/usage tracking.
+ * Execute a generateObject call with cost/usage tracking.
  *
- * All agent calls should use this instead of raw generateText() so that
- * token usage and cost are consistently recorded.
+ * Mirrors trackedGenerate() but wraps generateObject() for structured-output
+ * phases (pre-planning, planning, verification) that use Zod schemas.
+ *
+ * Returns the full generateObject result augmented with `llmCostUsd` so
+ * orchestrators can include the phase cost in their return value without
+ * an additional calculateCallCost() call.
  *
  * @param entry           Resolved model entry from resolveModelForTask()
  * @param ctx             Routing context (complexityScore, consumer, etc.)
- * @param params          generateText parameters excluding "model"
+ * @param params          generateObject parameters excluding "model"
  * @param providerConfigs Active ProviderConfig list (needed for Ollama instances)
  * @param onRecord        Callback to persist the ProviderCallRecord (e.g. POST to backend)
  */
-export async function trackedGenerate(
+export async function trackedGenerateObject(
   entry: ModelEntry,
   ctx: RoutingContext,
-  params: Omit<Parameters<typeof generateText>[0], "model">,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  params: Omit<Parameters<typeof generateObject>[0], "model">,
   providerConfigs: ProviderConfig[],
   onRecord: (record: ProviderCallRecord) => Promise<void>
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-): Promise<Awaited<ReturnType<typeof generateText<any, any>>>> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<Awaited<ReturnType<typeof generateObject<any, any>>> & { llmCostUsd: number }> {
   const start = Date.now();
   const consumer = ctx.consumer ?? "general";
 
@@ -38,9 +43,10 @@ export async function trackedGenerate(
     : resolveModel({ provider: entry.provider, model: entry.model });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const result = await generateText({ ...params, model } as any);
+  const result = await generateObject({ ...params, model } as any);
   const usage = result.usage;
-  const caps = entry.capabilities;
+
+  const llmCostUsd = calculateCallCost(entry, usage.inputTokens ?? 0, usage.outputTokens ?? 0);
 
   await onRecord({
     id: crypto.randomUUID(),
@@ -52,10 +58,10 @@ export async function trackedGenerate(
     consumer,
     inputTokens: usage.inputTokens ?? 0,
     outputTokens: usage.outputTokens ?? 0,
-    costUsd: calculateCallCost(entry, usage.inputTokens ?? 0, usage.outputTokens ?? 0),
+    costUsd: llmCostUsd,
     durationMs: Date.now() - start,
     wasEscalated: (ctx.excludeInstances?.length ?? 0) > 0,
   });
 
-  return result;
+  return { ...result, llmCostUsd };
 }

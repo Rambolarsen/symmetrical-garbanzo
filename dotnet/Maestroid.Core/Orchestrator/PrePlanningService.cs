@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Maestroid.Core.Providers;
 
 namespace Maestroid.Core.Orchestrator;
 
@@ -48,18 +49,26 @@ public record PrePlanningResult(
 /// Phase 0: Pre-Planning.
 /// Analyzes a task and scores its complexity to decide if full planning is needed.
 /// </summary>
-public class PrePlanningService(IServiceProvider services)
+public class PrePlanningService(IProviderRegistry registry, IConfiguration? config = null)
 {
-    private IChatClient? chatClient =>
-        (services as IKeyedServiceProvider)?.GetKeyedService<IChatClient>("fast");
+    // Pre-planning routing context — bootstrapping convention.
+    // Score 0 always resolves to fast tier; this is deliberate, not a hardcode.
+    private static readonly RoutingContext PrePlanningCtx = new(
+        ComplexityScore: 0,
+        RequiresToolUse: false
+    );
 
-    // Repair uses the stronger model — Haiku struggles to fix its own malformed output
-    private IChatClient? repairClient =>
-        (services as IKeyedServiceProvider)?.GetKeyedService<IChatClient>("balanced") ?? chatClient;
+    // Repair uses balanced floor — a model that can't fix its own output isn't useful.
+    private static readonly RoutingContext RepairCtx = new(
+        ComplexityScore: 0,
+        MinTier: ModelTier.Balanced
+    );
+
+    private IChatClient ChatClient => registry.ResolveForTask(PrePlanningCtx);
+    private IChatClient RepairClient => registry.ResolveForTask(RepairCtx);
 
     private int TimeoutSeconds =>
-        services.GetService<IConfiguration>()?
-            .GetValue<int?>("PrePlanning:TimeoutSeconds") ?? 600;
+        config?.GetValue<int?>("PrePlanning:TimeoutSeconds") ?? 600;
 
     private const string SystemPrompt = """
         You are a scope analysis agent. Analyze the given task and return a JSON object.
@@ -142,8 +151,7 @@ public class PrePlanningService(IServiceProvider services)
             ? $"TASK SPECIFICATION:\n{task}"
             : $"TASK SPECIFICATION:\n{task}\n\n---\nPROJECT CONTEXT (background only — your job is to analyze the TASK SPECIFICATION above):\n{context}";
 
-        if (chatClient is null)
-            throw new InvalidOperationException("No LLM provider available. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or start Ollama (ollama serve).");
+        // ChatClient is resolved via IProviderRegistry — throws if no provider is available.
 
         if (onProgress is not null)
             await onProgress(new PlanProgressEvent(
@@ -384,8 +392,7 @@ public class PrePlanningService(IServiceProvider services)
         Func<PlanProgressEvent, CancellationToken, Task>? onProgress,
         CancellationToken ct)
     {
-        if (chatClient is null)
-            throw new InvalidOperationException("No LLM provider available.");
+        var chatClient = ChatClient;
 
         var messages = new[]
         {
@@ -431,9 +438,7 @@ public class PrePlanningService(IServiceProvider services)
 
     private async Task<string> RepairJsonAsync(string json, CancellationToken ct)
     {
-        if (repairClient is null)
-            throw new InvalidOperationException("No LLM provider available for JSON repair.");
-
+        var repairClient = RepairClient;
         ChatResponse repairResponse;
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(TimeoutSeconds));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);

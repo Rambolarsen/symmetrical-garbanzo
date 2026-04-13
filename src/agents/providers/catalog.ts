@@ -3,6 +3,21 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import type { ModelEntry } from "../../types/index.js";
 
+/**
+ * Calculate the USD cost of a call using the model entry's capability metadata.
+ * Returns 0 for local models (costPerInputToken === 0).
+ */
+export function calculateCallCost(
+  entry: ModelEntry,
+  inputTokens: number,
+  outputTokens: number
+): number {
+  return (
+    inputTokens  * entry.capabilities.costPerInputToken +
+    outputTokens * entry.capabilities.costPerOutputToken
+  );
+}
+
 const _dirname = dirname(fileURLToPath(import.meta.url));
 
 // Load the bundled JSON at module init time (synchronous, file is small)

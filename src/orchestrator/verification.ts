@@ -1,7 +1,7 @@
-import { generateObject } from "ai";
 import { z } from "zod";
-import { resolveModel, MODELS } from "../agents/providers/index.js";
-import type { VerificationResult, ModelRef } from "../types/index.js";
+import { resolveModelForTask } from "../agents/providers/index.js";
+import { trackedGenerateObject } from "../agents/providers/tracked-generate-object.js";
+import type { VerificationResult, RoutingContext, ProviderCallRecord, ProviderConfig } from "../types/index.js";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -50,15 +50,19 @@ Overall pass/fail:
 // Main function
 // ---------------------------------------------------------------------------
 
+async function noopRecord(_record: ProviderCallRecord): Promise<void> {}
+
 export interface VerifyInput {
   taskTitle: string;
   successCriteria: string[];
   executionOutput: string;
-  model?: ModelRef;
+  routingContext?: Partial<RoutingContext>;  // override if needed; defaults to fast
+  providerConfigs?: ProviderConfig[];
+  onRecord?: (record: ProviderCallRecord) => Promise<void>;
 }
 
 export async function verifyExecution(input: VerifyInput): Promise<VerificationResult> {
-  const { taskTitle, successCriteria, executionOutput, model } = input;
+  const { taskTitle, successCriteria, executionOutput } = input;
 
   if (successCriteria.length === 0) {
     return {
@@ -68,7 +72,14 @@ export async function verifyExecution(input: VerifyInput): Promise<VerificationR
     };
   }
 
-  const resolvedModel = resolveModel(model ?? MODELS.fast);
+  const ctx: RoutingContext = {
+    complexityScore: 0,     // always fast — verification is simple evidence assessment
+    requiresToolUse: false,
+    consumer: "general",
+    ...input.routingContext,
+  };
+
+  const entry = resolveModelForTask(ctx);
 
   const userPrompt = `Task: ${taskTitle}
 
@@ -82,12 +93,17 @@ ${executionOutput.trim() || "(no output captured)"}
 
 Assess whether each criterion was satisfied based on the execution output above.`;
 
-  const { object } = await generateObject({
-    model: resolvedModel,
-    schema: VerificationSchema,
-    system: VERIFIER_SYSTEM,
-    prompt: userPrompt,
-  });
+  const { object } = await trackedGenerateObject(
+    entry,
+    ctx,
+    {
+      schema: VerificationSchema,
+      system: VERIFIER_SYSTEM,
+      prompt: userPrompt,
+    },
+    input.providerConfigs ?? [],
+    input.onRecord ?? noopRecord
+  );
 
   // Map back to VerificationResult — ensure criteria array aligns with input
   const criteriaChecks = successCriteria.map((criterion, i) => {

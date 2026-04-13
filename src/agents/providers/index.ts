@@ -11,6 +11,7 @@ import type {
   ProviderConfig,
   RoutingContext,
 } from "../../types/index.js";
+import { TIER_RANK } from "../../types/index.js";
 import { getCatalog, isOllamaInstance } from "./catalog.js";
 
 const ollama = createOllama();
@@ -178,8 +179,12 @@ export function buildTierCatalog(
  * to resolveAdapter() alongside their ConsumerType to get the correct wire protocol.
  */
 export function resolveModelForTask(ctx: RoutingContext): ModelEntry {
-  const tier = assignTier(ctx.complexityScore);
-  const candidates = _tierCatalog[tier];
+  const assignedTier = assignTier(ctx.complexityScore);
+  const effectiveTier: ModelTier =
+    ctx.minTier !== undefined && TIER_RANK[assignedTier] < TIER_RANK[ctx.minTier]
+      ? ctx.minTier
+      : assignedTier;
+  const candidates = _tierCatalog[effectiveTier];
   const catalog = getCatalog();
   const excluded = new Set(ctx.excludeInstances ?? []);
 
@@ -206,7 +211,7 @@ export function resolveModelForTask(ctx: RoutingContext): ModelEntry {
     return resolveModelForTask({ ...ctx, preferLocal: false });
   }
 
-  throw new Error(`No suitable model found for complexity=${ctx.complexityScore}, tier=${tier}`);
+  throw new Error(`No suitable model found for complexity=${ctx.complexityScore}, tier=${effectiveTier}`);
 }
 
 // ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Maestroid.Core.Providers;
 
 namespace Maestroid.Core.Orchestrator;
 
@@ -58,13 +59,17 @@ public record PlanningResult(
 /// Phase 1: Planning.
 /// Decomposes a task into a Work Breakdown Structure following the 8/80 rule.
 /// </summary>
-public class PlanningService(IServiceProvider services)
+public class PlanningService(IProviderRegistry registry)
 {
     private const int MaxPlanningAttempts = 2;
     private static readonly Regex WorkPackageIdPattern = new(@"^\d+(?:\.\d+){0,3}$", RegexOptions.Compiled);
 
-    private IChatClient? chatClient =>
-        (services as IKeyedServiceProvider)?.GetKeyedService<IChatClient>("balanced");
+    private IChatClient GetPlanningClient(int complexityScore) =>
+        registry.ResolveForTask(new RoutingContext(
+            ComplexityScore: complexityScore,
+            RequiresToolUse: true,
+            MinTier: ModelTier.Balanced
+        ));
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -163,8 +168,8 @@ public class PlanningService(IServiceProvider services)
         Func<PlanProgressEvent, CancellationToken, Task>? onProgress = null,
         CancellationToken ct = default)
     {
-        if (chatClient is null)
-            throw new InvalidOperationException("No LLM provider available. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or start Ollama (ollama serve).");
+        // Resolve complexity score from pre-planning; default to 50 (balanced) if not available.
+        var complexityScore = prePlanning?.ComplexityScore ?? 50;
 
         var basePrompt = BuildPrompt(task, prePlanning, context);
         var prompt = basePrompt;
@@ -180,7 +185,7 @@ public class PlanningService(IServiceProvider services)
                     Attempt: attempt,
                     MaxAttempts: MaxPlanningAttempts), ct);
 
-            var dto = await RequestPlanningDtoAsync(prompt, onProgress, ct);
+            var dto = await RequestPlanningDtoAsync(GetPlanningClient(complexityScore), prompt, onProgress, ct);
             issues = ValidatePlanningResponse(dto);
 
             if (issues.Count == 0)
@@ -269,17 +274,15 @@ public class PlanningService(IServiceProvider services)
     }
 
     private async Task<PlanningResponseDto> RequestPlanningDtoAsync(
+        IChatClient chatClient,
         string prompt,
         Func<PlanProgressEvent, CancellationToken, Task>? onProgress,
         CancellationToken ct)
     {
-        if (chatClient is null)
-            throw new InvalidOperationException("No LLM provider available. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or start Ollama (ollama serve).");
-
         string responseText;
         try
         {
-            responseText = await RequestPrimaryTextAsync(prompt, onProgress, ct);
+            responseText = await RequestPrimaryTextAsync(chatClient, prompt, onProgress, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -288,7 +291,7 @@ public class PlanningService(IServiceProvider services)
                 ex);
         }
 
-        var json = await ExtractValidJsonAsync(responseText, onProgress, ct);
+        var json = await ExtractValidJsonAsync(chatClient, responseText, onProgress, ct);
 
         return JsonSerializer.Deserialize<PlanningResponseDto>(json, JsonOptions)
             ?? throw new InvalidOperationException("LLM returned null planning response.");
@@ -521,6 +524,7 @@ public class PlanningService(IServiceProvider services)
     }
 
     private async Task<string> ExtractValidJsonAsync(
+        IChatClient chatClient,
         string raw,
         Func<PlanProgressEvent, CancellationToken, Task>? onProgress,
         CancellationToken ct)
@@ -541,7 +545,7 @@ public class PlanningService(IServiceProvider services)
                     Phase: "planning",
                     Tier: "balanced"), ct);
 
-            var repaired = await RepairJsonAsync(raw, ct);
+            var repaired = await RepairJsonAsync(chatClient, raw, ct);
 
             try
             {
@@ -559,13 +563,11 @@ public class PlanningService(IServiceProvider services)
     }
 
     private async Task<string> RequestPrimaryTextAsync(
+        IChatClient chatClient,
         string prompt,
         Func<PlanProgressEvent, CancellationToken, Task>? onProgress,
         CancellationToken ct)
     {
-        if (chatClient is null)
-            throw new InvalidOperationException("No LLM provider available.");
-
         var messages = new[]
         {
             new ChatMessage(ChatRole.System, SystemPrompt),
@@ -608,11 +610,8 @@ public class PlanningService(IServiceProvider services)
         (ex.Message.Contains("stream", StringComparison.OrdinalIgnoreCase) &&
          ex.Message.Contains("not supported", StringComparison.OrdinalIgnoreCase));
 
-    private async Task<string> RepairJsonAsync(string raw, CancellationToken ct)
+    private static async Task<string> RepairJsonAsync(IChatClient chatClient, string raw, CancellationToken ct)
     {
-        if (chatClient is null)
-            throw new InvalidOperationException("No LLM provider available for JSON repair.");
-
         ChatResponse repairResponse;
         try
         {

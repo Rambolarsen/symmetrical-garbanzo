@@ -1,6 +1,6 @@
 import { generateText, streamText, tool, stepCountIs } from "ai";
-import type { ToolDefinition, AgentRole, ModelRef } from "../types/index.js";
-import { resolveModel, MODELS } from "./providers/index.js";
+import type { ToolDefinition, AgentRole, ModelRef, RoutingContext } from "../types/index.js";
+import { resolveModel, resolveModelForTask, MODELS } from "./providers/index.js";
 import { withSerenaTools } from "../tools/serena.js";
 import { runClaudeCodeAgent, type ClaudeCodeAgentOptions } from "./claude-code/agent.js";
 
@@ -10,6 +10,15 @@ import { runClaudeCodeAgent, type ClaudeCodeAgentOptions } from "./claude-code/a
 
 export interface LLMAgentOptions {
   role: AgentRole;
+  /**
+   * Routing context — routing picks the model based on complexity, capabilities,
+   * and provider availability. Replaces the old `model` field.
+   */
+  routingContext?: RoutingContext;
+  /**
+   * @deprecated Pass `routingContext` instead. Kept for backward compatibility
+   * while call sites are migrated. Will be removed in a follow-up cleanup.
+   */
   model?: ModelRef;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tools?: ToolDefinition<any, any>[];
@@ -48,7 +57,26 @@ export async function runLLMAgent(
   task: string,
   options: LLMAgentOptions
 ): Promise<AgentResult> {
-  const { role, model = MODELS.balanced, tools: toolDefs = [], mcpTools, useSerena = false, projectPath, maxSteps = 10, stream = false, onChunk } = options;
+  const { role, tools: toolDefs = [], mcpTools, useSerena = false, projectPath, maxSteps = 10, stream = false, onChunk } = options;
+
+  // Resolve which model to use — routing context takes priority over deprecated model field.
+  // If neither is provided, default to a balanced mid-complexity context.
+  let resolvedModelRef: ModelRef;
+  if (options.routingContext) {
+    const entry = resolveModelForTask(options.routingContext);
+    resolvedModelRef = { provider: entry.provider, model: entry.model };
+  } else if (options.model) {
+    resolvedModelRef = options.model;
+  } else {
+    // Safe default: balanced tier, mid-complexity
+    const ctx: RoutingContext = {
+      complexityScore: 50,
+      requiresToolUse: true,
+      consumer: "general",
+    };
+    const entry = resolveModelForTask(ctx);
+    resolvedModelRef = { provider: entry.provider, model: entry.model };
+  }
 
   // Build tool set — each entry must use `tool()` helper with inputSchema
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -77,7 +105,7 @@ export async function runLLMAgent(
         : undefined;
 
     const start = Date.now();
-    const resolvedModel = resolveModel(model);
+    const resolvedModel = resolveModel(resolvedModelRef);
     const sharedParams = {
       model: resolvedModel,
       system: role.instructions,
@@ -107,7 +135,7 @@ export async function runLLMAgent(
 
     return {
       output,
-      cost: estimateCost(model, inputTokens, outputTokens),
+      cost: estimateCost(resolvedModelRef, inputTokens, outputTokens),
       durationMs: Date.now() - start,
       kind: "llm",
     };
@@ -156,3 +184,6 @@ function estimateCost(ref: ModelRef, inputTokens: number, outputTokens: number):
   const pricing = PRICE_PER_M[ref.model] ?? { input: 0, output: 0 };
   return (inputTokens / 1_000_000) * pricing.input + (outputTokens / 1_000_000) * pricing.output;
 }
+
+// Re-export MODELS for any remaining legacy callers during migration
+export { MODELS };
