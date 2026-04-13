@@ -5,9 +5,6 @@ namespace Maestroid.Core.Providers;
 
 public class ProviderService(MasteroidDbContext db) : IProviderService
 {
-    public Task<List<ProviderConfig>> GetEnabledByProviderAsync(string provider, CancellationToken ct = default) =>
-        GetEnabledAsync(provider, ct);
-
     public async Task<List<ProviderConfig>> GetEnabledAsync(CancellationToken ct = default)
     {
         var entities = await db.ProviderConfigs

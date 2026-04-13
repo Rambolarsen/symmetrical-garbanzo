@@ -5,12 +5,6 @@ namespace Maestroid.Core.Providers;
 /// </summary>
 public interface IProviderService
 {
-    /// <summary>
-    /// Returns all enabled provider configs for a specific provider type (e.g. "ollama").
-    /// Used by infrastructure components like <see cref="IOllamaClientFactory"/> at startup.
-    /// </summary>
-    Task<List<ProviderConfig>> GetEnabledByProviderAsync(string provider, CancellationToken ct = default);
-
     /// <summary>Returns all enabled provider configs across every provider type.</summary>
     Task<List<ProviderConfig>> GetEnabledAsync(CancellationToken ct = default);
 

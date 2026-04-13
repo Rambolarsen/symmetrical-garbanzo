@@ -56,7 +56,7 @@ builder.Services.AddSingleton<IOllamaClientFactory>(sp =>
     // Configs are reloaded on the next app restart or on catalog invalidation.
     using var scope   = sp.CreateScope();
     var providerSvc   = scope.ServiceProvider.GetRequiredService<IProviderService>();
-    var configs       = providerSvc.GetEnabledByProviderAsync("ollama").GetAwaiter().GetResult();
+    var configs       = providerSvc.GetEnabledAsync("ollama").GetAwaiter().GetResult();
     return new OllamaClientFactory(configs);
 });
 
@@ -284,16 +284,16 @@ app.MapPost("/api/providers", async (
         encryptedKey  = protector.Protect(req.ApiKey);
     }
 
-    var entity = new ProviderConfigEntity
-    {
-        Name            = req.Name,
-        Provider        = req.Provider,
-        BaseUrl         = req.BaseUrl,
-        IsLocal         = req.IsLocal,
-        Enabled         = req.Enabled,
-        Priority        = req.Priority,
-        EncryptedApiKey = encryptedKey,
-    };
+    var config = new ProviderConfig(
+        Id:       Guid.Empty,      // service assigns a new Guid
+        Name:     req.Name,
+        Provider: req.Provider,
+        BaseUrl:  req.BaseUrl,
+        IsLocal:  req.IsLocal,
+        Enabled:  req.Enabled,
+        Priority: req.Priority,
+        ApiKey:   encryptedKey     // already encrypted above; service writes to EncryptedApiKey
+    );
 
     var id = await providerSvc.AddAsync(config, ct);
     return Results.Created($"/api/providers/{id}", new { id = id.ToString() });
