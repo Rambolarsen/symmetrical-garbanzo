@@ -1,5 +1,4 @@
 using Microsoft.Extensions.AI;
-using Maestroid.Core.Data;
 
 namespace Maestroid.Core.Providers;
 
@@ -12,9 +11,9 @@ namespace Maestroid.Core.Providers;
 /// </summary>
 public class OllamaClientFactory : IOllamaClientFactory
 {
-    private readonly IEnumerable<ProviderConfigEntity> _configs;
+    private readonly IEnumerable<ProviderConfig> _configs;
 
-    public OllamaClientFactory(IEnumerable<ProviderConfigEntity> configs)
+    public OllamaClientFactory(IEnumerable<ProviderConfig> configs)
     {
         _configs = configs;
     }
@@ -34,7 +33,7 @@ public class OllamaClientFactory : IOllamaClientFactory
         };
     }
 
-    private static IChatClient BuildAnthropicCompatibleClient(ProviderConfigEntity config)
+    private static IChatClient BuildAnthropicCompatibleClient(ProviderConfig config)
     {
         // Wire to Anthropic IChatClient with baseUrl pointing at Ollama.
         // apiKey = "ollama" (Ollama ignores it; SDK requires a value).
@@ -44,7 +43,7 @@ public class OllamaClientFactory : IOllamaClientFactory
             "Use the TS sidecar for Claude Code consumers in the meantime.");
     }
 
-    private static IChatClient BuildOpenAiCompatibleClient(ProviderConfigEntity config)
+    private static IChatClient BuildOpenAiCompatibleClient(ProviderConfig config)
     {
         // Wire to OpenAI IChatClient pointed at Ollama's /v1 endpoint.
         // TODO: implement using OpenAI SDK or OllamaSharp

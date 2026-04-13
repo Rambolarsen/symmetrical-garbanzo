@@ -47,15 +47,16 @@ builder.Services.AddAgentProviders(builder.Configuration);
 // Provider registry — capability-aware routing with fallback
 // ---------------------------------------------------------------------------
 
+builder.Services.AddScoped<IProviderService, ProviderService>();
+builder.Services.AddScoped<IProviderTelemetryService, ProviderTelemetryService>();
+
 builder.Services.AddSingleton<IOllamaClientFactory>(sp =>
 {
     // Snapshot current Ollama configs from DB at startup for the singleton factory.
     // Configs are reloaded on the next app restart or on catalog invalidation.
-    using var scope = sp.CreateScope();
-    var db      = scope.ServiceProvider.GetRequiredService<MasteroidDbContext>();
-    var configs = db.ProviderConfigs
-        .Where(c => c.Provider == "ollama" && c.Enabled)
-        .ToList();
+    using var scope   = sp.CreateScope();
+    var providerSvc   = scope.ServiceProvider.GetRequiredService<IProviderService>();
+    var configs       = providerSvc.GetEnabledByProviderAsync("ollama").GetAwaiter().GetResult();
     return new OllamaClientFactory(configs);
 });
 
@@ -247,13 +248,13 @@ app.MapPost("/health/ollama/start", async (IConfiguration config, IHttpClientFac
 // Provider configs CRUD — sidecar fetches at startup via GET /api/providers
 // ---------------------------------------------------------------------------
 
-app.MapGet("/api/providers", async (MasteroidDbContext db, string? type, CancellationToken ct) =>
+app.MapGet("/api/providers", async (IProviderService providerSvc, string? type, CancellationToken ct) =>
 {
-    var query = db.ProviderConfigs.Where(c => c.Enabled);
-    if (!string.IsNullOrWhiteSpace(type))
-        query = query.Where(c => c.Provider == type);
+    var configs = string.IsNullOrWhiteSpace(type)
+        ? await providerSvc.GetEnabledAsync(ct)
+        : await providerSvc.GetEnabledAsync(type, ct);
 
-    var configs = await query
+    var response = configs
         .OrderBy(c => c.Priority)
         .Select(c => new
         {
@@ -265,15 +266,14 @@ app.MapGet("/api/providers", async (MasteroidDbContext db, string? type, Cancell
             enabled  = c.Enabled,
             priority = c.Priority,
             // apiKey intentionally omitted — never returned to clients
-        })
-        .ToListAsync(ct);
+        });
 
-    return Results.Ok(configs);
+    return Results.Ok(response);
 }).ExcludeFromDescription();
 
 app.MapPost("/api/providers", async (
     ProviderConfigRequest req,
-    MasteroidDbContext db,
+    IProviderService providerSvc,
     IDataProtectionProvider dpProvider,
     CancellationToken ct) =>
 {
@@ -295,44 +295,39 @@ app.MapPost("/api/providers", async (
         EncryptedApiKey = encryptedKey,
     };
 
-    db.ProviderConfigs.Add(entity);
-    await db.SaveChangesAsync(ct);
-
-    return Results.Created($"/api/providers/{entity.Id}", new { id = entity.Id.ToString() });
+    var id = await providerSvc.AddAsync(config, ct);
+    return Results.Created($"/api/providers/{id}", new { id = id.ToString() });
 }).ExcludeFromDescription();
 
 // ---------------------------------------------------------------------------
 // Provider call records — sidecar POSTs here after each trackedGenerate() call
 // ---------------------------------------------------------------------------
 
-app.MapPost("/api/provider-calls", async (ProviderCallRecordRequest req, MasteroidDbContext db, CancellationToken ct) =>
+app.MapPost("/api/provider-calls", async (ProviderCallRecordRequest req, IProviderTelemetryService callSvc, CancellationToken ct) =>
 {
-    var entity = new ProviderCallRecordEntity
-    {
-        Id            = Guid.TryParse(req.Id, out var id) ? id : Guid.NewGuid(),
-        Timestamp     = req.Timestamp,
-        WorkPackageId = req.WorkPackageId,
-        PhaseId       = req.PhaseId,
-        InstanceId    = req.InstanceId,
-        Provider      = req.Provider,
-        Model         = req.Model,
-        Tier          = req.Tier,
-        Consumer      = req.Consumer,
-        InputTokens   = req.InputTokens,
-        OutputTokens  = req.OutputTokens,
-        CostUsd       = (decimal)req.CostUsd,
-        DurationMs    = req.DurationMs,
-        WasEscalated  = req.WasEscalated,
-    };
+    var record = new ProviderCallRecord(
+        Id:            Guid.TryParse(req.Id, out var id) ? id : Guid.NewGuid(),
+        Timestamp:     req.Timestamp,
+        WorkPackageId: req.WorkPackageId,
+        PhaseId:       req.PhaseId,
+        InstanceId:    req.InstanceId,
+        Provider:      req.Provider,
+        Model:         req.Model,
+        Tier:          req.Tier,
+        Consumer:      req.Consumer,
+        InputTokens:   req.InputTokens,
+        OutputTokens:  req.OutputTokens,
+        CostUsd:       (decimal)req.CostUsd,
+        DurationMs:    req.DurationMs,
+        WasEscalated:  req.WasEscalated
+    );
 
-    db.ProviderCallRecords.Add(entity);
-    await db.SaveChangesAsync(ct);
-
-    return Results.Created($"/api/provider-calls/{entity.Id}", new { id = entity.Id.ToString() });
+    var recordId = await callSvc.RecordAsync(record, ct);
+    return Results.Created($"/api/provider-calls/{recordId}", new { id = recordId.ToString() });
 }).ExcludeFromDescription();
 
 // User-model overrides endpoint — sidecar fetches custom model entries from DB
-app.MapGet("/api/provider-models", (MasteroidDbContext db) =>
+app.MapGet("/api/provider-models", () =>
 {
     // Reserved for future user-defined model overrides (Layer 3 of the catalog).
     // Returns empty list until the model override feature is implemented.
