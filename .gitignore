@@ -23,6 +23,13 @@ coverage/
 bin/
 obj/
 TestResults/
+*.user
+*.nupkg
+
+# SQLite (dev database)
+*.db
+*.db-shm
+*.db-wal
 
 # IDE and editor settings
 .vs/
