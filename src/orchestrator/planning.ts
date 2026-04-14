@@ -1,7 +1,7 @@
-import { generateObject } from "ai";
 import { z } from "zod";
-import { resolveModel, MODELS } from "../agents/providers/index.js";
-import type { PlanningResult, PrePlanningResult, ModelRef, WBSElement, WorkBreakdownStructure, ExecutionPhase } from "../types/index.js";
+import { resolveModelForTask } from "../agents/providers/index.js";
+import { trackedGenerateObject } from "../agents/providers/tracked-generate-object.js";
+import type { PlanningResult, PrePlanningResult, WBSElement, WorkBreakdownStructure, ExecutionPhase, RoutingContext, ProviderCallRecord, ProviderConfig } from "../types/index.js";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -99,17 +99,21 @@ function computeCriticalPath(elements: WBSElement[]): number {
   return workPackages.length > 0 ? Math.max(...workPackages.map(e => longest(e.id))) : 0;
 }
 
+async function noopRecord(_record: ProviderCallRecord): Promise<void> {}
+
 // ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
 export interface PlanningOptions {
-  model?: ModelRef;
+  routingContext?: Partial<RoutingContext>;
+  providerConfigs?: ProviderConfig[];
+  onRecord?: (record: ProviderCallRecord) => Promise<void>;
 }
 
 export interface PlanningRun {
   result: PlanningResult;
-  cost: number;
+  llmCostUsd: number;
   durationMs: number;
 }
 
@@ -119,29 +123,38 @@ export interface PlanningRun {
  * Decomposes a task into a Work Breakdown Structure following the 8/80 rule.
  * Optionally takes a PrePlanningResult from Phase 0 as context.
  *
- * Uses the balanced model by default (Sonnet) for higher-quality decomposition.
+ * Uses minTier: "balanced" — WBS quality degrades significantly on fast models.
+ * The complexity score from pre-planning drives tier selection within that floor.
  */
 export async function runPlanning(
   task: string,
   prePlanning?: PrePlanningResult,
   options: PlanningOptions = {}
 ): Promise<PlanningRun> {
-  const { model = MODELS.balanced } = options;
+  const ctx: RoutingContext = {
+    complexityScore: prePlanning?.complexityScore ?? 50,  // default to mid if no pre-planning
+    requiresToolUse: true,
+    minTier: "balanced",      // planning floor — fast models produce poor WBS
+    consumer: "general",
+    ...options.routingContext,
+  };
+
+  const entry = resolveModelForTask(ctx);
 
   const prompt = buildPrompt(task, prePlanning);
   const start = Date.now();
 
-  const { object, usage } = await generateObject({
-    model: resolveModel(model),
-    system: PLANNER_SYSTEM,
-    prompt,
-    schema: PlanningSchema,
-  });
-
-  // Sonnet pricing: $3/M input, $15/M output
-  const inputTokens = usage?.inputTokens ?? 0;
-  const outputTokens = usage?.outputTokens ?? 0;
-  const llmCost = ((inputTokens / 1_000_000) * 3) + ((outputTokens / 1_000_000) * 15);
+  const { object, llmCostUsd } = await trackedGenerateObject(
+    entry,
+    ctx,
+    {
+      system: PLANNER_SYSTEM,
+      prompt,
+      schema: PlanningSchema,
+    },
+    options.providerConfigs ?? [],
+    options.onRecord ?? noopRecord
+  );
 
   const scopeId = prePlanning?.scopeId ?? `scope_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -189,14 +202,14 @@ export async function runPlanning(
     executionPlan,
   };
 
-  return { result, cost: llmCost, durationMs: Date.now() - start };
+  return { result, llmCostUsd, durationMs: Date.now() - start };
 }
 
 /**
  * Format a planning result for display to the human at the decision gate.
  */
 export function formatPlanningReport(run: PlanningRun): string {
-  const { result, cost, durationMs } = run;
+  const { result, llmCostUsd, durationMs } = run;
   const { wbs, executionPlan } = result;
   const workPackages = wbs.elements.filter(e => e.isWorkPackage);
 
@@ -209,7 +222,7 @@ export function formatPlanningReport(run: PlanningRun): string {
     `Critical path:  ${wbs.criticalPathHours.toFixed(0)}h`,
     `Parallel saves: ~${(wbs.totalEstimatedHours - wbs.criticalPathHours).toFixed(0)}h`,
     `Est. cost:      ~$${wbs.totalEstimatedCost.toFixed(2)}`,
-    `Planning cost:  $${cost.toFixed(4)}  (${durationMs}ms)`,
+    `Planning cost:  $${llmCostUsd.toFixed(4)}  (${durationMs}ms)`,
     ``,
   ];
 

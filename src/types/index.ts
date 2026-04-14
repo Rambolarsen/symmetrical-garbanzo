@@ -97,7 +97,15 @@ export interface RoutingContext {
   preferLocal?: boolean;
   excludeInstances?: string[];   // instanceIds already tried — prevents retry loops
   consumer?: ConsumerType;       // drives adapter selection for Ollama; defaults to "general"
+  minTier?: ModelTier;           // floor — routing will never return a tier below this
 }
+
+/** Used internally by resolveModelForTask() to enforce minTier. */
+export const TIER_RANK: Record<ModelTier, number> = {
+  fast:     0,
+  balanced: 1,
+  powerful: 2,
+};
 
 // ---------------------------------------------------------------------------
 // Cost tracking

@@ -1,7 +1,7 @@
-import { generateObject } from "ai";
 import { z } from "zod";
-import { resolveModel, MODELS } from "../agents/providers/index.js";
-import type { PrePlanningResult, ModelRef } from "../types/index.js";
+import { resolveModelForTask } from "../agents/providers/index.js";
+import { trackedGenerateObject } from "../agents/providers/tracked-generate-object.js";
+import type { PrePlanningResult, RoutingContext, ProviderCallRecord, ProviderConfig } from "../types/index.js";
 
 const PrePlanningSchema = z.object({
   isTaskCoherent: z.boolean(),
@@ -63,14 +63,18 @@ If isTaskCoherent is true:
   - scoreBreakdown scores must sum exactly to complexityScore
   - explain the total score in scoreRationale`;
 
+async function noopRecord(_record: ProviderCallRecord): Promise<void> {}
+
 export interface PrePlanningOptions {
-  model?: ModelRef;
-  context?: string;  // optional extra context (e.g. codebase summary, constraints)
+  routingContext?: Partial<RoutingContext>;  // override defaults if needed
+  context?: string;                          // optional extra context (e.g. codebase summary)
+  providerConfigs?: ProviderConfig[];
+  onRecord?: (record: ProviderCallRecord) => Promise<void>;
 }
 
 export interface PrePlanningRun {
   result: PrePlanningResult;
-  cost: number;
+  llmCostUsd: number;
   durationMs: number;
 }
 
@@ -80,30 +84,40 @@ export interface PrePlanningRun {
  * Analyzes the task and returns a complexity score + recommendation on whether
  * full planning (Phase 1 / WBS) is needed before development.
  *
- * Runs fast (~2-5 seconds) using the cheap model by default.
+ * Uses complexityScore: 0 (bootstrapping convention) — the score doesn't exist
+ * yet, so we deliberately use the cheapest tier. This is not a hardcode; it is
+ * the routing system expressing "I don't know the complexity yet."
  */
 export async function runPrePlanning(
   task: string,
   options: PrePlanningOptions = {}
 ): Promise<PrePlanningRun> {
-  const { model = MODELS.fast, context } = options;
+  const ctx: RoutingContext = {
+    complexityScore: 0,       // bootstrapping convention — see spec section 2
+    requiresToolUse: false,
+    consumer: "general",
+    ...options.routingContext,
+  };
 
-  const prompt = context
-    ? `Task: ${task}\n\nAdditional context:\n${context}`
+  const entry = resolveModelForTask(ctx);
+
+  const prompt = options.context
+    ? `Task: ${task}\n\nAdditional context:\n${options.context}`
     : `Task: ${task}`;
 
   const start = Date.now();
 
-  const { object, usage } = await generateObject({
-    model: resolveModel(model),
-    system: RESEARCHER_SYSTEM,
-    prompt,
-    schema: PrePlanningSchema,
-  });
-
-  const inputTokens = usage?.inputTokens ?? 0;
-  const outputTokens = usage?.outputTokens ?? 0;
-  const cost = ((inputTokens / 1_000_000) * 0.8) + ((outputTokens / 1_000_000) * 4); // haiku pricing
+  const { object, llmCostUsd } = await trackedGenerateObject(
+    entry,
+    ctx,
+    {
+      system: RESEARCHER_SYSTEM,
+      prompt,
+      schema: PrePlanningSchema,
+    },
+    options.providerConfigs ?? [],
+    options.onRecord ?? noopRecord
+  );
 
   const scopeId = `scope_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -126,14 +140,14 @@ export async function runPrePlanning(
     recommendedAgents: object.recommendedAgents,
   };
 
-  return { result, cost, durationMs: Date.now() - start };
+  return { result, llmCostUsd, durationMs: Date.now() - start };
 }
 
 /**
  * Format a pre-planning result for display to the human at the decision gate.
  */
 export function formatPrePlanningReport(run: PrePlanningRun): string {
-  const { result, cost, durationMs } = run;
+  const { result, llmCostUsd, durationMs } = run;
   const bar = "█".repeat(Math.round(result.complexityScore / 5)).padEnd(20, "░");
 
   const lines: string[] = [
@@ -143,7 +157,7 @@ export function formatPrePlanningReport(run: PrePlanningRun): string {
       : `Task quality: needs clarification — ${result.coherenceNotes}`,
     `Complexity: ${bar} ${result.complexityScore}/100 (${result.complexityLevel})`,
     `Estimated:  ${result.estimatedHours}h  ~$${result.estimatedCost.toFixed(2)}`,
-    `Pre-planning cost: $${cost.toFixed(4)}  (${durationMs}ms)`,
+    `Pre-planning cost: $${llmCostUsd.toFixed(4)}  (${durationMs}ms)`,
     ``,
     result.requiresPlanning
       ? `⚠  PLANNING REQUIRED — complexity too high to skip safely`

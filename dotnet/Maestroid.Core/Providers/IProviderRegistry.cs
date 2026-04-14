@@ -11,7 +11,8 @@ public record RoutingContext(
     int? EstimatedInputTokens = null,
     bool PreferLocal = false,
     IReadOnlyList<string>? ExcludeInstances = null,
-    ConsumerType Consumer = ConsumerType.General
+    ConsumerType Consumer = ConsumerType.General,
+    ModelTier? MinTier = null   // floor — null means no floor
 );
 
 public interface IProviderRegistry

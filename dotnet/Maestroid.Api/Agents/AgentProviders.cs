@@ -146,6 +146,37 @@ public static class AgentProviderExtensions
             new DynamicTierChatClient("balanced", sp.GetRequiredService<ModelSelectionService>(), sp));
 
         // ------------------------------------------------------------------
+        // instanceId-keyed registrations for IProviderRegistry.
+        // These use the base client (model overridden per-call via ModelBoundChatClient
+        // or directly via ChatOptions.ModelId in ProviderRegistry.BuildClient()).
+        // Registered alongside the model-name-keyed ones — do not remove those
+        // yet as other code still uses the old keys.
+        // ------------------------------------------------------------------
+        if (!string.IsNullOrEmpty(anthropicKey))
+        {
+            var anthropicBase = new AnthropicClient(new APIAuthentication(anthropicKey)).Messages;
+            services.AddKeyedSingleton<IChatClient>("anthropic",
+                new ModelBoundChatClient((IChatClient)anthropicBase, Models.Balanced)
+                    .AsBuilder()
+                    .UseFunctionInvocation()
+                    .Build());
+        }
+
+        if (!string.IsNullOrEmpty(openAiKey))
+        {
+            var openAiClientForRegistry = new OpenAI.OpenAIClient(openAiKey);
+            services.AddKeyedSingleton<IChatClient>("openai",
+                openAiClientForRegistry.GetChatClient(Models.OpenAiBalanced)
+                    .AsIChatClient()
+                    .AsBuilder()
+                    .UseFunctionInvocation()
+                    .Build());
+        }
+
+        // google — add when Google provider is wired
+        // services.AddKeyedSingleton<IChatClient>("google", googleClient);
+
+        // ------------------------------------------------------------------
         // Semantic Kernel — only built when at least one key is configured
         // ------------------------------------------------------------------
         if (!string.IsNullOrEmpty(openAiKey))
