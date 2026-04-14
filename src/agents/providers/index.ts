@@ -93,6 +93,18 @@ export function assignTier(complexityScore: number): ModelTier {
   return "powerful";
 }
 
+/**
+ * Returns the effective tier after applying the minTier floor from the routing context.
+ * Use this (not assignTier) when recording telemetry so the logged tier matches
+ * the model that was actually used.
+ */
+export function effectiveTierFromCtx(ctx: RoutingContext): ModelTier {
+  const assigned = assignTier(ctx.complexityScore);
+  return ctx.minTier !== undefined && TIER_RANK[assigned] < TIER_RANK[ctx.minTier]
+    ? ctx.minTier
+    : assigned;
+}
+
 // ---------------------------------------------------------------------------
 // Tier catalog — ordered list of { instanceId, model } refs per tier.
 // Built at startup after ProviderConfigs and Ollama discovery complete.

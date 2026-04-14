@@ -5,9 +5,8 @@ import type {
   RoutingContext,
   ProviderConfig,
 } from "../../types/index.js";
-import { resolveModel } from "./index.js";
+import { resolveModel, effectiveTierFromCtx } from "./index.js";
 import { buildOllamaModel } from "./ollama-factory.js";
-import { assignTier } from "./index.js";
 import { calculateCallCost } from "./catalog.js";
 
 /**
@@ -54,7 +53,7 @@ export async function trackedGenerateObject(
     instanceId: entry.instanceId,
     provider: entry.provider,
     model: entry.model,
-    tier: assignTier(ctx.complexityScore),
+    tier: effectiveTierFromCtx(ctx),
     consumer,
     inputTokens: usage.inputTokens ?? 0,
     outputTokens: usage.outputTokens ?? 0,

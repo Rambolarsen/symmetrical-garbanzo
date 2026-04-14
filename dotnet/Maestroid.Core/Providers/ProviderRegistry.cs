@@ -120,13 +120,23 @@ public class ProviderRegistry : IProviderRegistry
         if (entry.Provider == "ollama")
             return _ollamaFactory.Create(entry.InstanceId, consumer);
 
-        // Cloud providers: DI keys are model IDs (e.g. "claude-haiku-4-5-20251001"),
-        // matching the registration pattern in AgentProviders.AddAgentProviders().
-        if (_serviceProvider is IKeyedServiceProvider keyed)
-            return keyed.GetRequiredKeyedService<IChatClient>(entry.Model);
+        if (_serviceProvider is not IKeyedServiceProvider keyed)
+            throw new InvalidOperationException(
+                "IServiceProvider does not support keyed services. Cannot resolve provider clients.");
 
-        throw new InvalidOperationException(
-            $"IServiceProvider does not support keyed services. Cannot resolve model '{entry.Model}'.");
+        // Cloud providers: prefer instanceId key (the HTTP transport + auth registration),
+        // wrapping with ModelOverrideChatClient to pin the specific model from the catalog.
+        // This decouples DI registration keys from model names — only instanceId must match,
+        // so adding new models to the catalog never requires new DI registrations.
+        // Falls back to model-name key for legacy per-model registrations during migration.
+        var instanceClient = keyed.GetKeyedService<IChatClient>(entry.InstanceId);
+        if (instanceClient is not null)
+            return new ModelOverrideChatClient(instanceClient, entry.Model);
+
+        return keyed.GetKeyedService<IChatClient>(entry.Model)
+            ?? throw new InvalidOperationException(
+                $"No IChatClient registered for instanceId='{entry.InstanceId}' or model='{entry.Model}'. " +
+                $"Ensure AddAgentProviders() registers a keyed client for this provider.");
     }
 
     // ---------------------------------------------------------------------------
